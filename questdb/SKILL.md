@@ -17,11 +17,20 @@ description: >
 
 ## How to Use This Skill
 
-This skill contains ready-to-use SQL, schemas, ingestion patterns, and Grafana
-queries. **Start writing code immediately** — do not fetch remote docs or explore
-library source code for patterns already covered here. If something doesn't work,
-iterate on the code rather than researching upfront. Only fetch docs for advanced
-or unusual queries not in this skill.
+**IMPORTANT — MINIMIZE ROUND-TRIPS:**
+- Do NOT explore library source code (cryptofeed, questdb, etc.)
+- Do NOT check library versions or verify callback signatures
+- Do NOT read installed package files to "understand the API"
+- Do NOT verify infrastructure is running — trust the user's prompt
+- Do NOT read extra reference files unless stuck — this skill file has everything
+- Do NOT use task tracking (TaskCreate/TaskUpdate) for straightforward builds
+- Do NOT add `sleep` commands to wait for data or check background processes
+- All API details for cryptofeed, QuestDB ingestion, and Grafana are below — use them as-is
+- If something fails at runtime, fix it then — do not research upfront
+
+This skill contains ready-to-use SQL, schemas, ingestion code, and Grafana
+queries. **Write the files and run them.** A typical pipeline is 3 files
+(schema setup, ingestion script, dashboard deploy) — write them, execute them, done.
 
 Additional references in the `references/` directory:
 - `common-mistakes.md` — Wrong patterns → correct QuestDB equivalents (**read first**)
@@ -363,8 +372,8 @@ The Grafana queries below work with these exact table/view names.
 
 ### Real-Time Crypto Feed (cryptofeed + QuestDB)
 
-Use `cryptofeed` to generate live market data into the schema above. This is the
-fastest way to get a working pipeline with real data for demos and testing.
+**Do NOT explore cryptofeed source code or check its version. Everything you need
+is right here.** Use `cryptofeed` to generate live market data into the schema above:
 
 ```python
 import asyncio
@@ -381,7 +390,7 @@ async def trade_cb(t, receipt_timestamp):
         sender.row(
             'trades',
             symbols={'symbol': t.symbol, 'side': t.side},
-            columns={'price': t.price, 'amount': t.amount},
+            columns={'price': float(t.price), 'amount': float(t.amount)},
             at=TimestampNanos(int(t.timestamp * 1e9))
         )
         sender.flush()
@@ -417,13 +426,15 @@ f.add_feed(OKX(
 f.run()
 ```
 
-**Key cryptofeed facts (do NOT explore source code for these):**
+**cryptofeed API reference (complete — tested with v2.4.x — do NOT read source code to verify):**
 - `t.symbol`, `t.side` (`'buy'`/`'sell'`), `t.price`, `t.amount`, `t.timestamp` (float epoch seconds)
+- **`t.price` and `t.amount` are `Decimal` types — cast with `float()` before passing to QuestDB Sender**
 - `book.book['bid']` and `book.book['ask']` are dicts: `{Decimal(price): Decimal(size), ...}`
 - `book.symbol`, `book.timestamp` (float epoch seconds)
 - Exchanges: `OKX`, `Coinbase`, `Binance`, `Kraken`, `Bybit`, etc.
 - Channels: `TRADES`, `L2_BOOK`, `L3_BOOK`, `TICKER`, `CANDLES`, `OPEN_INTEREST`, `FUNDING`, `LIQUIDATIONS`
 - Symbol format is exchange-native: `'BTC-USDT'` for OKX, `'BTC-USD'` for Coinbase
+- **Python compatibility:** avoid `X | None` type hints (requires 3.10+). Use `Optional[X]` or plain assignment.
 
 **Performance note:** The example above opens a Sender per callback for clarity.
 For production, use a shared Sender with periodic flush:
@@ -436,6 +447,19 @@ async def trade_cb(t, receipt_timestamp):
     sender.row('trades', symbols={...}, columns={...}, at=...)
     # flush periodically or use auto_flush_interval in conf string
 ```
+
+**Operational notes:**
+- cryptofeed logs to **stderr**, not stdout. An empty stdout does not mean failure.
+  Verify data flow by querying QuestDB: `SELECT count() FROM trades`
+- When building the pipeline, write 3 files (schema, ingestion, dashboard deploy)
+  and run them sequentially. Schema must exist before ingestion starts.
+- End the dashboard deploy script with `open` (macOS) or `xdg-open` (Linux)
+  to launch the browser automatically:
+  ```python
+  import subprocess, sys
+  url = f"{GRAFANA_URL}{resp.json()['url']}"
+  subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
+  ```
 
 ### QuestDB Demo Instance
 
@@ -620,8 +644,25 @@ FROM indicators;
 
 ### Dashboard Deployment via API
 
+Complete working deployment script. This dashboard JSON is tested and working
+— copy the structure exactly for all panels.
+
+**Target structure for every panel query:**
+```json
+{
+    "refId": "A",
+    "datasource": {"uid": "QUESTDB_UID", "type": "questdb-questdb-datasource"},
+    "format": 1,
+    "rawSql": "SELECT ts AS time, ... WHERE $__timeFilter(ts) ..."
+}
+```
+**CRITICAL:** `"format"` MUST be integer `1`, not string `"table"`. The QuestDB
+Grafana plugin uses a Go integer enum (`sqlutil.FormatQueryOption`). String values
+cause `json: cannot unmarshal string into Go struct field Query.format`. Grafana's
+JSON export shows `"table"` (string) but the API POST requires `1` (integer).
+
 ```python
-import requests, json
+import json, requests
 
 GRAFANA_URL = "http://localhost:3000"
 GRAFANA_AUTH = ("admin", "YOUR_PASSWORD")
@@ -629,25 +670,160 @@ GRAFANA_AUTH = ("admin", "YOUR_PASSWORD")
 # Find QuestDB datasource UID
 ds = requests.get(f"{GRAFANA_URL}/api/datasources", auth=GRAFANA_AUTH).json()
 questdb_uid = next(d["uid"] for d in ds if d["type"] == "questdb-questdb-datasource")
+DS_REF = {"uid": questdb_uid, "type": "questdb-questdb-datasource"}
 
-# Create/update dashboard
 dashboard = {
     "dashboard": {
-        "title": "My Dashboard",
-        "uid": "my-dashboard-uid",
+        "title": "Crypto Real-Time Market Data",
+        "uid": "crypto-realtime",
+        "timezone": "browser",
+        "refresh": "5s",
+        "schemaVersion": 38,
+        "time": {"from": "now-15m", "to": "now"},
+        "tags": ["crypto", "questdb", "realtime"],
         "templating": {"list": [{
-            "name": "symbol", "type": "query",
-            "query": "SELECT DISTINCT symbol FROM trades",
-            "datasource": {"uid": questdb_uid, "type": "questdb-questdb-datasource"},
+            "name": "symbol", "type": "query", "label": "Symbol",
+            "query": "SELECT DISTINCT symbol FROM trades ORDER BY symbol;",
+            "datasource": DS_REF,
+            "refresh": 2, "sort": 1,
+            "current": {"text": "BTC-USDT", "value": "BTC-USDT"},
         }]},
         "panels": [
-            # ... panel definitions with SQL queries above
+            {
+                "id": 1, "type": "candlestick",
+                "title": "OHLC Candlestick - $symbol",
+                "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+                "datasource": DS_REF,
+                "fieldConfig": {
+                    "defaults": {"custom": {"axisBorderShow": False, "axisPlacement": "auto"}},
+                    "overrides": [{"matcher": {"id": "byName", "options": "volume"},
+                                   "properties": [{"id": "custom.axisPlacement", "value": "hidden"}]}],
+                },
+                "options": {
+                    "mode": "candles+volume", "includeAllFields": False,
+                    "candleStyle": "candles", "colorStrategy": "open-close",
+                    "colors": {"up": "green", "down": "red"},
+                    "fields": {"open": "open", "high": "high", "low": "low",
+                               "close": "close", "volume": "volume"},
+                },
+                "targets": [{
+                    "refId": "A", "datasource": DS_REF, "format": 1,
+                    "rawSql": "SELECT ts AS time, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval;",
+                }],
+            },
+            {
+                "id": 2, "type": "timeseries",
+                "title": "VWAP - $symbol",
+                "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+                "datasource": DS_REF,
+                "fieldConfig": {
+                    "defaults": {"custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": True, "pointSize": 1}},
+                    "overrides": [
+                        {"matcher": {"id": "byName", "options": "vwap"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
+                                        {"id": "custom.lineWidth", "value": 2}]},
+                        {"matcher": {"id": "byName", "options": "close"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "white", "mode": "fixed"}},
+                                        {"id": "custom.lineWidth", "value": 1}]},
+                    ],
+                },
+                "targets": [{
+                    "refId": "A", "datasource": DS_REF, "format": 1,
+                    "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(open) AS open, max(high) AS high, min(low) AS low, last(close) AS close, sum(volume) AS volume FROM candles_1m WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval), vwap AS (SELECT ts, close, sum((high + low + close) / 3 * volume) OVER (ORDER BY ts CUMULATIVE) / sum(volume) OVER (ORDER BY ts CUMULATIVE) AS vwap FROM ohlc) SELECT ts AS time, close, vwap FROM vwap;",
+                }],
+            },
+            {
+                "id": 3, "type": "timeseries",
+                "title": "Bollinger Bands (20, 2) - $symbol",
+                "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+                "datasource": DS_REF,
+                "fieldConfig": {
+                    "defaults": {"custom": {"lineWidth": 1, "spanNulls": True, "pointSize": 1}},
+                    "overrides": [
+                        {"matcher": {"id": "byName", "options": "close"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "white", "mode": "fixed"}}]},
+                        {"matcher": {"id": "byName", "options": "sma20"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}},
+                                        {"id": "custom.lineWidth", "value": 2}]},
+                        {"matcher": {"id": "byName", "options": "upper_band"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "light-blue", "mode": "fixed"}},
+                                        {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}},
+                                        {"id": "custom.fillBelowTo", "value": "lower_band"},
+                                        {"id": "custom.fillOpacity", "value": 8}]},
+                        {"matcher": {"id": "byName", "options": "lower_band"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "light-blue", "mode": "fixed"}},
+                                        {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]},
+                    ],
+                },
+                "targets": [{
+                    "refId": "A", "datasource": DS_REF, "format": 1,
+                    "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(open) AS open, max(high) AS high, min(low) AS low, last(close) AS close, sum(volume) AS volume FROM candles_1m WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval), stats AS (SELECT ts, close, AVG(close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20, AVG(close * close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS avg_close_sq FROM ohlc) SELECT ts AS time, close, sma20, sma20 + 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS upper_band, sma20 - 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS lower_band FROM stats;",
+                }],
+            },
+            {
+                "id": 4, "type": "timeseries",
+                "title": "RSI (14) - $symbol",
+                "gridPos": {"h": 6, "w": 12, "x": 0, "y": 18},
+                "datasource": DS_REF,
+                "fieldConfig": {
+                    "defaults": {
+                        "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": True, "pointSize": 1,
+                                   "thresholdsStyle": {"mode": "dashed+area"}},
+                        "min": 0, "max": 100,
+                        "thresholds": {"mode": "absolute", "steps": [
+                            {"color": "green", "value": None},
+                            {"color": "green", "value": 30},
+                            {"color": "transparent", "value": 30.01},
+                            {"color": "transparent", "value": 69.99},
+                            {"color": "red", "value": 70},
+                        ]},
+                    },
+                    "overrides": [
+                        {"matcher": {"id": "byName", "options": "rsi"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]},
+                    ],
+                },
+                "targets": [{
+                    "refId": "A", "datasource": DS_REF, "format": 1,
+                    "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(open) AS open, max(high) AS high, min(low) AS low, last(close) AS close, sum(volume) AS volume FROM candles_1m WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval), changes AS (SELECT ts, close, close - LAG(close) OVER (ORDER BY ts) AS change FROM ohlc), gains_losses AS (SELECT ts, close, CASE WHEN change > 0 THEN change ELSE 0 END AS gain, CASE WHEN change < 0 THEN ABS(change) ELSE 0 END AS loss FROM changes), avg_gl AS (SELECT ts, close, AVG(gain) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_gain, AVG(loss) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_loss FROM gains_losses) SELECT ts AS time, CASE WHEN avg_loss = 0 THEN 100 ELSE 100 - (100 / (1 + avg_gain / NULLIF(avg_loss, 0))) END AS rsi FROM avg_gl;",
+                }],
+            },
+            {
+                "id": 5, "type": "timeseries",
+                "title": "Bid-Ask Spread - $symbol",
+                "gridPos": {"h": 6, "w": 12, "x": 12, "y": 18},
+                "datasource": DS_REF,
+                "fieldConfig": {
+                    "defaults": {"custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": True, "pointSize": 1}},
+                    "overrides": [
+                        {"matcher": {"id": "byName", "options": "spread"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
+                                        {"id": "custom.axisPlacement", "value": "right"}]},
+                        {"matcher": {"id": "byName", "options": "best_bid"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+                        {"matcher": {"id": "byName", "options": "best_ask"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
+                    ],
+                },
+                "targets": [{
+                    "refId": "A", "datasource": DS_REF, "format": 1,
+                    "rawSql": "SELECT ts AS time, avg(ask_prices[1] - bid_prices[1]) AS spread, avg(bid_prices[1]) AS best_bid, avg(ask_prices[1]) AS best_ask FROM orderbook WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval;",
+                }],
+            },
         ],
     },
     "overwrite": True,
 }
-requests.post(f"{GRAFANA_URL}/api/dashboards/db", auth=GRAFANA_AUTH,
-              headers={"Content-Type": "application/json"}, json=dashboard)
+
+resp = requests.post(f"{GRAFANA_URL}/api/dashboards/db", auth=GRAFANA_AUTH,
+                     headers={"Content-Type": "application/json"}, json=dashboard)
+url = f"{GRAFANA_URL}{resp.json().get('url', '')}"
+print(f"Dashboard: {resp.status_code} - {url}")
+
+# Open in browser
+import subprocess, sys
+subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
 ```
 
 Always reference the datasource by UID and type, never by display name.
+Do NOT add `sleep` commands to wait for data — deploy and move on.

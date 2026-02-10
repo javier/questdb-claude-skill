@@ -96,6 +96,7 @@ QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
 | `SAMPLE BY 1m` (hardcoded) with Grafana | `SAMPLE BY $__interval` | Let Grafana auto-calculate the interval based on the visible time range and panel width. |
 | PostgreSQL datasource for QuestDB | QuestDB datasource plugin (`questdb-questdb-datasource`) | The QuestDB plugin has optimized macros and better compatibility. |
 | `datasource: 'QuestDB'` (by name) in provisioned dashboards | `datasource: { uid: 'questdb-ds-uid', type: 'questdb-questdb-datasource' }` | Always reference datasources by UID and type, not display name. |
+| `"format": "table"` or `"format": "time_series"` (string) in panel targets | `"format": 1` (integer) | QuestDB Grafana plugin uses Go integer enum `sqlutil.FormatQueryOption`. Strings cause unmarshal error. Grafana JSON export shows string but API POST requires integer. |
 
 ## Schema Design Mistakes
 
