@@ -54,6 +54,7 @@ QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
 | `GROUP BY symbol` + `avg(...) OVER (...)` in same SELECT | Subquery: GROUP BY inside, window outside | Cannot mix GROUP BY/SAMPLE BY with window functions at same level. |
 | Manual EMA: `price * 2/(n+1) + prev * (1 - 2/(n+1))` | `avg(price, 'period', 20) OVER (...)` | QuestDB has native EMA. Don't implement manually. |
 | `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for running total | `sum(col) OVER (ORDER BY ts CUMULATIVE)` | QuestDB has a `CUMULATIVE` shorthand. Either syntax works, but CUMULATIVE is cleaner. |
+| `SELECT ts AS time, ... OVER (ORDER BY ts ...)` | Put all OVER() in CTEs where `ts` is unaliased. Final SELECT only does `ts AS time` with no OVER. | Once `ts` is aliased as `time`, OVER in the same SELECT cannot reference `ts`. Move window functions to CTEs. |
 
 ## TICK Syntax Mistakes
 
