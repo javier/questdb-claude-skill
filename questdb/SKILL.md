@@ -113,7 +113,7 @@ Key rules:
 - Valid intervals: `1s`, `5s`, `1m`, `15m`, `1h`, `1d`, `1M` (month)
 - `ALIGN TO CALENDAR` aligns buckets to clock boundaries (this is the default, so it can be omitted)
 - `FILL(PREV | NULL | LINEAR | value)` fills gaps — goes AFTER SAMPLE BY
-- `$__interval` in Grafana auto-calculates the interval from the time picker
+- In Grafana, default to `SAMPLE BY 5s` unless the user specifies a different bar size
 - `first()`, `last()` return first/last values within each time bucket
 - `count_distinct(col)` instead of `COUNT(DISTINCT col)`
 - No `HAVING` — use a subquery: `SELECT * FROM (... SAMPLE BY ...) WHERE volume > 1000`
@@ -480,7 +480,7 @@ Connects via PG wire on port 8812.
 
 Key macros:
 - `$__timeFilter(ts)` — time range from Grafana's time picker
-- `$__interval` — auto-calculated SAMPLE BY interval
+- Default SAMPLE BY interval: `5s`. Only change if the user specifies a different bar size.
 
 Symbol dropdown variable: `SELECT DISTINCT symbol FROM trades`
 
@@ -515,10 +515,10 @@ SELECT ts AS time,
     sum(amount) AS volume
 FROM trades
 WHERE $__timeFilter(ts) AND symbol = '$symbol'
-SAMPLE BY $__interval;
+SAMPLE BY 5s;
 ```
 
-**OHLC Candlestick (from materialized view — faster):**
+**OHLC Candlestick (from materialized view — faster for longer ranges):**
 ```sql
 SELECT ts AS time,
     first(open) AS open, max(high) AS high,
@@ -526,19 +526,19 @@ SELECT ts AS time,
     sum(volume) AS volume
 FROM candles_1m
 WHERE $__timeFilter(ts) AND symbol = '$symbol'
-SAMPLE BY $__interval;
+SAMPLE BY 5m;
 ```
 
 **VWAP (cumulative volume-weighted average price):**
 ```sql
 WITH ohlc AS (
     SELECT ts, symbol,
-        first(open) AS open, max(high) AS high,
-        min(low) AS low, last(close) AS close,
-        sum(volume) AS volume
-    FROM candles_1m
+        first(price) AS open, max(price) AS high,
+        min(price) AS low, last(price) AS close,
+        sum(amount) AS volume
+    FROM trades
     WHERE $__timeFilter(ts) AND symbol = '$symbol'
-    SAMPLE BY $__interval
+    SAMPLE BY 5s
 ),
 vwap AS (
     SELECT ts, close,
@@ -554,12 +554,12 @@ Uses manual variance — more compatible than `stddev_samp` in window frames:
 ```sql
 WITH ohlc AS (
     SELECT ts, symbol,
-        first(open) AS open, max(high) AS high,
-        min(low) AS low, last(close) AS close,
-        sum(volume) AS volume
-    FROM candles_1m
+        first(price) AS open, max(price) AS high,
+        min(price) AS low, last(price) AS close,
+        sum(amount) AS volume
+    FROM trades
     WHERE $__timeFilter(ts) AND symbol = '$symbol'
-    SAMPLE BY $__interval
+    SAMPLE BY 5s
 ),
 stats AS (
     SELECT ts, close,
@@ -583,12 +583,12 @@ For standalone EMA-smoothed RSI, see `references/indicators.md`.
 ```sql
 WITH ohlc AS (
     SELECT ts, symbol,
-        first(open) AS open, max(high) AS high,
-        min(low) AS low, last(close) AS close,
-        sum(volume) AS volume
-    FROM candles_1m
+        first(price) AS open, max(price) AS high,
+        min(price) AS low, last(price) AS close,
+        sum(amount) AS volume
+    FROM trades
     WHERE $__timeFilter(ts) AND symbol = '$symbol'
-    SAMPLE BY $__interval
+    SAMPLE BY 5s
 ),
 changes AS (
     SELECT ts, close,
@@ -623,12 +623,12 @@ For Wilder's smoothing (α=1/N), use `avg(gain, 'period', 27)`.
 ```sql
 WITH ohlc AS (
     SELECT ts, symbol,
-        first(open) AS open, max(high) AS high,
-        min(low) AS low, last(close) AS close,
-        sum(volume) AS volume
-    FROM candles_1m
+        first(price) AS open, max(price) AS high,
+        min(price) AS low, last(price) AS close,
+        sum(amount) AS volume
+    FROM trades
     WHERE $__timeFilter(ts) AND symbol = '$symbol'
-    SAMPLE BY $__interval
+    SAMPLE BY 5s
 ),
 indicators AS (
     SELECT ts, close,
@@ -652,7 +652,11 @@ FROM indicators;
 ### Dashboard Deployment via API
 
 Complete working deployment script. This dashboard JSON is tested and working
-— copy the structure exactly for all panels.
+— copy the structure exactly for all panels. Do not split or reorganize panels.
+
+**Panel layout rule:** VWAP, Bollinger Bands, and RSI are ALWAYS overlaid on an
+OHLC candlestick panel (multiple refIDs, `includeAllFields: true`). Never put
+them in separate timeseries panels.
 
 **Target structure for every panel query:**
 ```json
@@ -684,9 +688,13 @@ dashboard = {
         "title": "Crypto Real-Time Market Data",
         "uid": "crypto-realtime",
         "timezone": "browser",
-        "refresh": "5s",
+        "refresh": "250ms",
+        "liveNow": False,
         "schemaVersion": 38,
-        "time": {"from": "now-15m", "to": "now"},
+        "time": {"from": "now-5m", "to": "now"},
+        "timepicker": {
+            "refresh_intervals": ["250ms", "500ms", "1s", "5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"],
+        },
         "tags": ["crypto", "questdb", "realtime"],
         "templating": {"list": [{
             "name": "symbol", "type": "query", "label": "Symbol",
@@ -698,7 +706,7 @@ dashboard = {
         "panels": [
             {
                 "id": 1, "type": "candlestick",
-                "title": "OHLC Candlestick - $symbol",
+                "title": "OHLC - $symbol",
                 "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
                 "datasource": DS_REF,
                 "fieldConfig": {
@@ -715,40 +723,22 @@ dashboard = {
                 },
                 "targets": [{
                     "refId": "A", "datasource": DS_REF, "format": 1,
-                    "rawSql": "SELECT ts AS time, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval;",
+                    "rawSql": "SELECT ts AS time, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s;",
                 }],
             },
             {
-                "id": 2, "type": "timeseries",
-                "title": "VWAP - $symbol",
-                "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+                "id": 2, "type": "candlestick",
+                "title": "OHLC + Indicators - $symbol",
+                "gridPos": {"h": 10, "w": 24, "x": 0, "y": 10},
                 "datasource": DS_REF,
                 "fieldConfig": {
-                    "defaults": {"custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": True, "pointSize": 1}},
+                    "defaults": {"custom": {"axisBorderShow": False, "axisPlacement": "auto"}},
                     "overrides": [
+                        {"matcher": {"id": "byName", "options": "volume"},
+                         "properties": [{"id": "custom.axisPlacement", "value": "hidden"}]},
                         {"matcher": {"id": "byName", "options": "vwap"},
                          "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
                                         {"id": "custom.lineWidth", "value": 2}]},
-                        {"matcher": {"id": "byName", "options": "close"},
-                         "properties": [{"id": "color", "value": {"fixedColor": "white", "mode": "fixed"}},
-                                        {"id": "custom.lineWidth", "value": 1}]},
-                    ],
-                },
-                "targets": [{
-                    "refId": "A", "datasource": DS_REF, "format": 1,
-                    "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(open) AS open, max(high) AS high, min(low) AS low, last(close) AS close, sum(volume) AS volume FROM candles_1m WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval), vwap AS (SELECT ts, close, sum((high + low + close) / 3 * volume) OVER (ORDER BY ts CUMULATIVE) / sum(volume) OVER (ORDER BY ts CUMULATIVE) AS vwap FROM ohlc) SELECT ts AS time, close, vwap FROM vwap;",
-                }],
-            },
-            {
-                "id": 3, "type": "timeseries",
-                "title": "Bollinger Bands (20, 2) - $symbol",
-                "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
-                "datasource": DS_REF,
-                "fieldConfig": {
-                    "defaults": {"custom": {"lineWidth": 1, "spanNulls": True, "pointSize": 1}},
-                    "overrides": [
-                        {"matcher": {"id": "byName", "options": "close"},
-                         "properties": [{"id": "color", "value": {"fixedColor": "white", "mode": "fixed"}}]},
                         {"matcher": {"id": "byName", "options": "sma20"},
                          "properties": [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}},
                                         {"id": "custom.lineWidth", "value": 2}]},
@@ -760,45 +750,43 @@ dashboard = {
                         {"matcher": {"id": "byName", "options": "lower_band"},
                          "properties": [{"id": "color", "value": {"fixedColor": "light-blue", "mode": "fixed"}},
                                         {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]},
+                        {"matcher": {"id": "byFrameRefID", "options": "D"},
+                         "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}},
+                                        {"id": "custom.axisPlacement", "value": "right"},
+                                        {"id": "min", "value": 0}, {"id": "max", "value": 100},
+                                        {"id": "unit", "value": "percent"}]},
                     ],
                 },
-                "targets": [{
-                    "refId": "A", "datasource": DS_REF, "format": 1,
-                    "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(open) AS open, max(high) AS high, min(low) AS low, last(close) AS close, sum(volume) AS volume FROM candles_1m WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval), stats AS (SELECT ts, close, AVG(close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20, AVG(close * close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS avg_close_sq FROM ohlc) SELECT ts AS time, close, sma20, sma20 + 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS upper_band, sma20 - 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS lower_band FROM stats;",
-                }],
-            },
-            {
-                "id": 4, "type": "timeseries",
-                "title": "RSI (14) - $symbol",
-                "gridPos": {"h": 6, "w": 12, "x": 0, "y": 18},
-                "datasource": DS_REF,
-                "fieldConfig": {
-                    "defaults": {
-                        "custom": {"lineWidth": 2, "fillOpacity": 5, "spanNulls": True, "pointSize": 1,
-                                   "thresholdsStyle": {"mode": "dashed+area"}},
-                        "min": 0, "max": 100,
-                        "thresholds": {"mode": "absolute", "steps": [
-                            {"color": "green", "value": None},
-                            {"color": "green", "value": 30},
-                            {"color": "transparent", "value": 30.01},
-                            {"color": "transparent", "value": 69.99},
-                            {"color": "red", "value": 70},
-                        ]},
+                "options": {
+                    "mode": "candles+volume", "includeAllFields": True,
+                    "candleStyle": "candles", "colorStrategy": "open-close",
+                    "colors": {"up": "green", "down": "red"},
+                    "fields": {"open": "open", "high": "high", "low": "low",
+                               "close": "close", "volume": "volume"},
+                },
+                "targets": [
+                    {
+                        "refId": "A", "datasource": DS_REF, "format": 1,
+                        "rawSql": "SELECT ts AS time, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s;",
                     },
-                    "overrides": [
-                        {"matcher": {"id": "byName", "options": "rsi"},
-                         "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]},
-                    ],
-                },
-                "targets": [{
-                    "refId": "A", "datasource": DS_REF, "format": 1,
-                    "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(open) AS open, max(high) AS high, min(low) AS low, last(close) AS close, sum(volume) AS volume FROM candles_1m WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval), changes AS (SELECT ts, close, close - LAG(close) OVER (ORDER BY ts) AS change FROM ohlc), gains_losses AS (SELECT ts, close, CASE WHEN change > 0 THEN change ELSE 0 END AS gain, CASE WHEN change < 0 THEN ABS(change) ELSE 0 END AS loss FROM changes), avg_gl AS (SELECT ts, close, AVG(gain) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_gain, AVG(loss) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_loss FROM gains_losses) SELECT ts AS time, CASE WHEN avg_loss = 0 THEN 100 ELSE 100 - (100 / (1 + avg_gain / NULLIF(avg_loss, 0))) END AS rsi FROM avg_gl;",
-                }],
+                    {
+                        "refId": "B", "datasource": DS_REF, "format": 1,
+                        "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s), vwap AS (SELECT ts, sum((high + low + close) / 3 * volume) OVER (ORDER BY ts CUMULATIVE) / sum(volume) OVER (ORDER BY ts CUMULATIVE) AS vwap FROM ohlc) SELECT ts AS time, vwap FROM vwap;",
+                    },
+                    {
+                        "refId": "C", "datasource": DS_REF, "format": 1,
+                        "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s), stats AS (SELECT ts, close, AVG(close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20, AVG(close * close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS avg_close_sq FROM ohlc) SELECT ts AS time, sma20, sma20 + 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS upper_band, sma20 - 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS lower_band FROM stats;",
+                    },
+                    {
+                        "refId": "D", "datasource": DS_REF, "format": 1,
+                        "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s), changes AS (SELECT ts, close, close - LAG(close) OVER (ORDER BY ts) AS change FROM ohlc), gains_losses AS (SELECT ts, close, CASE WHEN change > 0 THEN change ELSE 0 END AS gain, CASE WHEN change < 0 THEN ABS(change) ELSE 0 END AS loss FROM changes), avg_gl AS (SELECT ts, close, AVG(gain) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_gain, AVG(loss) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_loss FROM gains_losses) SELECT ts AS time, CASE WHEN avg_loss = 0 THEN 100 ELSE 100 - (100 / (1 + avg_gain / NULLIF(avg_loss, 0))) END AS rsi FROM avg_gl;",
+                    },
+                ],
             },
             {
-                "id": 5, "type": "timeseries",
+                "id": 3, "type": "timeseries",
                 "title": "Bid-Ask Spread - $symbol",
-                "gridPos": {"h": 6, "w": 12, "x": 12, "y": 18},
+                "gridPos": {"h": 6, "w": 24, "x": 0, "y": 20},
                 "datasource": DS_REF,
                 "fieldConfig": {
                     "defaults": {"custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": True, "pointSize": 1}},
@@ -814,7 +802,7 @@ dashboard = {
                 },
                 "targets": [{
                     "refId": "A", "datasource": DS_REF, "format": 1,
-                    "rawSql": "SELECT ts AS time, avg(ask_prices[1] - bid_prices[1]) AS spread, avg(bid_prices[1]) AS best_bid, avg(ask_prices[1]) AS best_ask FROM orderbook WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY $__interval;",
+                    "rawSql": "SELECT ts AS time, avg(ask_prices[1] - bid_prices[1]) AS spread, avg(bid_prices[1]) AS best_bid, avg(ask_prices[1]) AS best_ask FROM orderbook WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s;",
                 }],
             },
         ],
