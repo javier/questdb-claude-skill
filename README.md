@@ -17,3 +17,32 @@ tracking. Just write the files and run them. Open the dashboard in my browser on
 files or to create the python scripts.
 
 ```
+
+All of these indicators are embedded into the skill and should be fast to generate. For other
+indicators, the skill will relay on QuestDB online docs.
+
+
+Aggressor imbalance
+ATR
+Bid-ask spread
+Bollinger Bands
+Bollinger BandWidth
+Compound interest
+Cumulative product
+Donchian Channels
+Keltner Channels
+Liquidity comparison
+MACD
+Maximum drawdown
+OBV
+OHLC bars
+Rate of Change
+Realized volatility
+Rolling std dev
+RSI
+Stochastic Oscillator
+TICK & TRIN
+Volume profile
+Volume spikes
+VWAP
+

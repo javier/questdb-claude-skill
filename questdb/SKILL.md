@@ -22,7 +22,8 @@ description: >
 - Do NOT check library versions or verify callback signatures
 - Do NOT read installed package files to "understand the API"
 - Do NOT verify infrastructure is running — trust the user's prompt
-- Do NOT read extra reference files unless stuck — this skill file has everything
+- Do NOT read extra reference files for topics already covered in this skill file
+- DO read reference files when their topic applies (e.g. enterprise.md for auth, grafana-advanced.md for complex panels)
 - Do NOT use task tracking (TaskCreate/TaskUpdate) for straightforward builds
 - Do NOT add `sleep` commands to wait for data or check background processes
 - All API details for cryptofeed, QuestDB ingestion, and Grafana are below — use them as-is
@@ -32,11 +33,12 @@ This skill contains ready-to-use SQL, schemas, ingestion code, and Grafana
 queries. **Write the files and run them.** A typical pipeline is 3 files
 (schema setup, ingestion script, dashboard deploy) — write them, execute them, done.
 
-Additional references in the `references/` directory:
-- `common-mistakes.md` — Wrong patterns → correct QuestDB equivalents (**read first**)
-- `grafana-advanced.md` — Multi-query panels, axis overrides, repeating panels, order book visualization
+Additional references in the `references/` directory — **read the relevant ones
+before writing code** when their topic applies:
+- `common-mistakes.md` — Wrong patterns → correct QuestDB equivalents (**always read first**)
+- `grafana-advanced.md` — Read when building multi-query panels, axis overrides, repeating panels, or order book visualization
 - `cookbook.md` — Fetch paths for 30+ cookbook recipes (only for patterns not inline here)
-- `enterprise.md` — Authentication, ACL, tokens, TLS (skip for open source)
+- `enterprise.md` — **Read when QuestDB uses authentication, HTTPS, tokens, or ACLs** (skip for open source)
 
 ## Critical Rule
 
@@ -685,7 +687,7 @@ dashboard = {
             "name": "symbol", "type": "query", "label": "Symbol",
             "query": "SELECT DISTINCT symbol FROM trades ORDER BY symbol;",
             "datasource": DS_REF,
-            "refresh": 2, "sort": 1,
+            "refresh": 1, "sort": 1,
             "current": {"text": "BTC-USDT", "value": "BTC-USDT"},
         }]},
         "panels": [
