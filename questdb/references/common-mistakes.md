@@ -53,6 +53,7 @@ QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
 | `WHERE row_num = 1` in same query as `ROW_NUMBER() OVER (...) AS row_num` | CTE: compute window in inner query, filter in outer | Cannot filter on window function results in the same query level. |
 | `GROUP BY symbol` + `avg(...) OVER (...)` in same SELECT | Subquery: GROUP BY inside, window outside | Cannot mix GROUP BY/SAMPLE BY with window functions at same level. |
 | Manual EMA: `price * 2/(n+1) + prev * (1 - 2/(n+1))` | `avg(price, 'period', 20) OVER (...)` | QuestDB has native EMA. Don't implement manually. |
+| `avg(computed_col, 'period', N) OVER (...)` on a CTE column | `AVG(computed_col) OVER (ORDER BY ts ROWS BETWEEN N-1 PRECEDING AND CURRENT ROW)` | EMA (`avg` with `'period'`) may fail on computed/CTE columns. Use SMA with explicit ROWS BETWEEN as fallback. |
 | `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for running total | `sum(col) OVER (ORDER BY ts CUMULATIVE)` | QuestDB has a `CUMULATIVE` shorthand. Either syntax works, but CUMULATIVE is cleaner. |
 | `SELECT ts AS time, ... OVER (ORDER BY ts ...)` | Put all OVER() in CTEs where `ts` is unaliased. Final SELECT only does `ts AS time` with no OVER. | Once `ts` is aliased as `time`, OVER in the same SELECT cannot reference `ts`. Move window functions to CTEs. |
 
@@ -127,12 +128,12 @@ QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
 
 | ❌ Don't | ✅ Do Instead | Why |
 |---|---|---|
-| Put OHLC + VWAP + RSI + Bollinger in separate panels | Use one candlestick panel with multiple queries (refIDs) and `includeAllFields: true` | Overlaying indicators on candles in one panel is standard for financial dashboards. |
+| Duplicate candlestick panels for the same data | Overlay VWAP + Bollinger on the candlestick panel via multiple refIDs with `includeAllFields: true`. RSI and spread go in their own panels. | One candlestick panel with overlays, separate panels only for different chart types (oscillators, spread). |
 | Use `stddev_samp()` in window functions | Compute manually: `sqrt(avg(x*x) - avg(x)^2)` | `stddev_samp` may not work inside window frames. Manual variance is more compatible. |
 | Use a single time range for all panels | Use per-panel `timeFrom` overrides (e.g. `"1m"`, `"30m"`, `"now/d"`) | Different panels need different ranges: real-time tables need seconds, indicators need hours. |
 | Forget `hideTimeOverride: true` on panels with `timeFrom` | Always set `hideTimeOverride: true` | Otherwise Grafana shows an ugly time override label in the panel title. |
 | Create one panel per symbol manually | Use `repeat: "SYMBOL"` on panels or rows with `repeatDirection: "h"` | Auto-duplicates per symbol. Much cleaner and scales with symbol count. |
-| Use `SELECT DISTINCT symbol FROM trades` for dropdown | Use LATEST ON to get only symbols with recent data | `LATEST ON` avoids returning dead symbols with no recent data. |
+| `SELECT DISTINCT symbol FROM trades` on tables with millions of stale symbols | `LATEST ON` to get only symbols with recent data | For fresh pipelines, `DISTINCT` is fine. Switch to `LATEST ON` only when stale symbols clutter the dropdown. |
 | Reference datasource by name | Always use UID and type: `{"uid": "...", "type": "questdb-questdb-datasource"}` | Names can change. UIDs are stable. |
 | Assume all indicators share the same Y-axis | Use `byFrameRefID` overrides to give RSI its own axis and unit | RSI is 0-100, price is in dollars. They need separate axes. |
 

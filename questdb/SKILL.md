@@ -33,10 +33,11 @@ This skill contains ready-to-use SQL, schemas, ingestion code, and Grafana
 queries. **Write the files and run them.** A typical pipeline is 3 files
 (schema setup, ingestion script, dashboard deploy) — write them, execute them, done.
 
-Additional references in the `references/` directory — **read the relevant ones
-before writing code** when their topic applies:
-- `common-mistakes.md` — Wrong patterns → correct QuestDB equivalents (**always read first**)
-- `grafana-advanced.md` — Read when building multi-query panels, axis overrides, repeating panels, or order book visualization
+Additional references in the `references/` directory — only read when the user's
+request goes beyond what this file covers:
+- `common-mistakes.md` — Wrong patterns → correct QuestDB equivalents (read when writing novel SQL not already templated below)
+- `grafana-advanced.md` — Read only for Plotly order book depth charts or advanced features not in the dashboard template below
+- `indicators.md` — Read when user asks for indicators beyond OHLC/VWAP/Bollinger/RSI (MACD, ATR, Stochastic, OBV, Drawdown, Keltner, Donchian, etc.)
 - `cookbook.md` — Fetch paths for 30+ cookbook recipes (only for patterns not inline here)
 - `enterprise.md` — **Read when QuestDB uses authentication, HTTPS, tokens, or ACLs** (skip for open source)
 
@@ -245,7 +246,8 @@ Use ILP for all high-throughput ingestion. **Never use INSERT INTO for streaming
 from questdb.ingress import Sender, TimestampNanos
 import numpy as np
 
-# Open Source (no auth). For Enterprise auth, see references/enterprise.md
+# Open Source (no auth). For Enterprise: read references/enterprise.md Quick Start
+# (admin creates service account + token via REST → ingestion script uses token)
 conf = "tcp::addr=localhost:9009;protocol_version=2;"
 
 with Sender.from_conf(conf) as sender:
@@ -304,6 +306,7 @@ conn = pg.connect("user=admin password=quest host=localhost port=8812 dbname=qdb
 ### HTTP REST API
 
 - **Query**: `GET http://localhost:9000/exec?query=URL_ENCODED_SQL`
+- **Enterprise**: see Quick Start in `references/enterprise.md`
 - **POST is not supported** for the exec endpoint — use GET only
 - Returns JSON: `{ "columns": [...], "dataset": [...] }`
 
@@ -385,7 +388,7 @@ from cryptofeed.exchanges import OKX
 from cryptofeed.defines import TRADES, L2_BOOK
 from questdb.ingress import Sender, TimestampNanos
 
-conf = "tcp::addr=localhost:9009;protocol_version=2;"
+conf = "tcp::addr=localhost:9009;protocol_version=2;"  # Enterprise: see references/enterprise.md
 
 async def trade_cb(t, receipt_timestamp):
     with Sender.from_conf(conf) as sender:
@@ -575,7 +578,8 @@ FROM stats;
 ```
 
 **RSI (14-period, SMA-smoothed):**
-RSI is NOT in the QuestDB cookbook. Uses SMA via ROWS BETWEEN, proven in production:
+This Grafana version uses SMA via ROWS BETWEEN, proven in production.
+For standalone EMA-smoothed RSI, see `references/indicators.md`.
 ```sql
 WITH ohlc AS (
     SELECT ts, symbol,
@@ -611,8 +615,9 @@ SELECT ts AS time,
     END AS rsi
 FROM avg_gl;
 ```
-Note: For EMA-smoothed RSI, replace the AVG...ROWS BETWEEN with
+Note: For EMA-smoothed RSI (standard), replace the AVG...ROWS BETWEEN with
 `avg(gain, 'period', 14) OVER (ORDER BY ts)` (QuestDB native EMA).
+For Wilder's smoothing (α=1/N), use `avg(gain, 'period', 27)`.
 
 **Combined VWAP + Bollinger (single panel, multiple series):**
 ```sql
