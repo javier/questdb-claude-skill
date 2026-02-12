@@ -26,12 +26,65 @@ description: >
 - DO read reference files when their topic applies (e.g. enterprise.md for auth, grafana-advanced.md for complex panels)
 - Do NOT use task tracking (TaskCreate/TaskUpdate) for straightforward builds
 - Do NOT add `sleep` commands to wait for data or check background processes
+- Do NOT set dashboard refresh to `"5s"` — the default is `"250ms"`
+- When opening the dashboard URL in the browser, ALWAYS append `?refresh=250ms` to the URL. Without this, Grafana ignores the JSON refresh setting.
 - All API details for cryptofeed, QuestDB ingestion, and Grafana are below — use them as-is
-- If something fails at runtime, fix it then — do not research upfront
+- Known Python environment issues are already solved in the templates below:
+  **uvloop:** When creating a NEW venv, pip may pull a uvloop version that crashes on Python 3.10+
+  (`RuntimeError: no current event loop`). Uninstall it after pip install in fresh venvs only.
+  Never uninstall uvloop from a user's existing venv — their setup already works.
+  **macOS SSL:** Homebrew Python lacks system CA certificates. Any outbound HTTPS/WSS
+  connection (exchange WebSockets, API calls) fails without certifi. Always set
+  `SSL_CERT_FILE` via certifi at the top of scripts that make network connections.
+  These fixes are baked into the pip commands and Python templates below — copy them exactly.
 
 This skill contains ready-to-use SQL, schemas, ingestion code, and Grafana
 queries. **Write the files and run them.** A typical pipeline is 3 files
 (schema setup, ingestion script, dashboard deploy) — write them, execute them, done.
+
+### Execution Scenarios
+
+Pick the scenario that matches the user's request. Run the exact commands shown.
+
+**Scenario A — Everything from scratch (Docker + venv + pipeline):**
+Run this single bash block — it parallelizes Docker pulls with venv creation:
+```bash
+docker run -d --name questdb -p 9000:9000 -p 9009:9009 -p 8812:8812 questdb/questdb:latest &
+docker run -d --name grafana -p 3000:3000 \
+  -e GF_INSTALL_PLUGINS=questdb-questdb-datasource \
+  -e GF_SECURITY_ADMIN_PASSWORD=admin \
+  -e GF_DASHBOARDS_MIN_REFRESH_INTERVAL=250ms grafana/grafana:latest &
+python3 -m venv .venv && .venv/bin/pip install -q cryptofeed questdb psycopg[binary] requests numpy certifi && \
+  .venv/bin/pip uninstall uvloop -y 2>/dev/null &
+wait
+```
+Then configure the datasource (wait for Grafana first):
+```bash
+for i in $(seq 1 30); do curl -sf http://localhost:3000/api/health > /dev/null && break; sleep 1; done
+curl -s -X POST http://localhost:3000/api/datasources \
+  -u admin:admin -H "Content-Type: application/json" \
+  -d '{"name":"QuestDB","type":"questdb-questdb-datasource","access":"proxy","jsonData":{"server":"host.docker.internal","port":8812,"username":"admin","tlsMode":"disable","timeout":"120","queryTimeout":"60"},"secureJsonData":{"password":"quest"}}'
+```
+**Datasource fields (QuestDB Grafana plugin uses jsonData, NOT the standard url field):**
+- `server`: hostname only, no port, no protocol (e.g. `host.docker.internal`)
+- `port`: integer, separate from server (e.g. `8812`)
+- `tlsMode`: must be `"disable"` for local Docker — omitting it defaults to TLS enabled, which breaks the connection
+- `username`/`password`: QuestDB defaults are `admin`/`quest`
+Then write 3 files (schema, ingestion, dashboard) and run them.
+
+**Scenario B — Containers running, need venv:**
+```bash
+python3 -m venv .venv && .venv/bin/pip install -q cryptofeed questdb psycopg[binary] requests numpy certifi && \
+  .venv/bin/pip uninstall uvloop -y 2>/dev/null
+```
+Then write 3 files and run them.
+
+**Scenario C — User provides existing venv path:**
+Trust the user's venv as-is. Do NOT run pip install or uninstall anything.
+Write 3 files and run them. Use the user's venv path for all `python` commands.
+
+**Scenario D — Everything already running, just need pipeline scripts:**
+Write 3 files and run them. No infrastructure setup needed.
 
 Additional references in the `references/` directory — only read when the user's
 request goes beyond what this file covers:
@@ -375,13 +428,20 @@ The Grafana queries below work with these exact table/view names.
 
 ## Demo & Sample Data
 
+Infrastructure setup commands are in the **Execution Scenarios** section above.
+Pick the scenario that matches, run the exact commands, then proceed here.
+
 ### Real-Time Crypto Feed (cryptofeed + QuestDB)
 
 **Do NOT explore cryptofeed source code or check its version. Everything you need
-is right here.** Use `cryptofeed` to generate live market data into the schema above:
+is right here.** Copy this ingestion script verbatim. The certifi/SSL fix and all
+imports are required — do not omit any lines:
 
 ```python
-import asyncio
+import os
+import certifi
+os.environ['SSL_CERT_FILE'] = certifi.where()  # Required: macOS lacks system CA certs for HTTPS/WSS
+
 import numpy as np
 from cryptofeed import FeedHandler
 from cryptofeed.exchanges import OKX
@@ -440,6 +500,8 @@ f.run()
 - Channels: `TRADES`, `L2_BOOK`, `L3_BOOK`, `TICKER`, `CANDLES`, `OPEN_INTEREST`, `FUNDING`, `LIQUIDATIONS`
 - Symbol format is exchange-native: `'BTC-USDT'` for OKX, `'BTC-USD'` for Coinbase
 - **Python compatibility:** avoid `X | None` type hints (requires 3.10+). Use `Optional[X]` or plain assignment.
+- **Dependencies (fresh venv):** `pip install cryptofeed questdb psycopg[binary] requests numpy certifi && pip uninstall uvloop -y`
+- **macOS SSL:** Always set `SSL_CERT_FILE` via certifi before any outbound HTTPS/WSS connections (Homebrew Python lacks system CA certs)
 
 **Performance note:** The example above opens a Sender per callback for clarity.
 For production, use a shared Sender with periodic flush:
@@ -459,10 +521,10 @@ async def trade_cb(t, receipt_timestamp):
 - When building the pipeline, write 3 files (schema, ingestion, dashboard deploy)
   and run them sequentially. Schema must exist before ingestion starts.
 - End the dashboard deploy script with `open` (macOS) or `xdg-open` (Linux)
-  to launch the browser automatically:
+  to launch the browser automatically. **Include `?refresh=250ms` in the URL**
+  so the dashboard opens with the correct refresh rate:
   ```python
-  import subprocess, sys
-  url = f"{GRAFANA_URL}{resp.json()['url']}"
+  url = f"{GRAFANA_URL}{resp.json()['url']}?refresh=250ms&from=now-5m&to=now"
   subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
   ```
 
@@ -478,6 +540,15 @@ Fetch the schema reference: `curl -sH "Accept: text/markdown" "https://questdb.c
 QuestDB has a dedicated Grafana datasource plugin (`questdb-questdb-datasource`).
 Connects via PG wire on port 8812.
 
+**Datasource API config (the QuestDB plugin uses jsonData, NOT the standard url field):**
+- `jsonData.server`: hostname only — no port, no protocol (e.g. `host.docker.internal`)
+- `jsonData.port`: integer, separate from server (e.g. `8812`)
+- `jsonData.tlsMode`: `"disable"` for local Docker — **omitting defaults to TLS enabled, which breaks**
+- `jsonData.username` + `secureJsonData.password`: QuestDB defaults `admin`/`quest`
+- Do NOT use the `url` field — the QuestDB plugin ignores it
+
+The dashboard deploy template below includes create-or-find datasource logic. Use it.
+
 Key macros:
 - `$__timeFilter(ts)` — time range from Grafana's time picker
 - Default SAMPLE BY interval: `5s`. Only change if the user specifies a different bar size.
@@ -486,17 +557,6 @@ Symbol dropdown variable: `SELECT DISTINCT symbol FROM trades`
 
 For advanced Grafana patterns (multi-query panels, axis overrides, repeating
 panels, order book depth charts), see `references/grafana-advanced.md`.
-
-### Discovering the QuestDB Datasource UID
-
-```python
-import requests
-r = requests.get("http://localhost:3000/api/datasources",
-                 auth=("admin", "YOUR_PASSWORD"))
-for ds in r.json():
-    if ds["type"] == "questdb-questdb-datasource":
-        print(ds["uid"])
-```
 
 ### Ready-to-Use Grafana Queries
 
@@ -658,6 +718,20 @@ Complete working deployment script. This dashboard JSON is tested and working
 OHLC candlestick panel (multiple refIDs, `includeAllFields: true`). Never put
 them in separate timeseries panels.
 
+**Dashboard defaults (copy exactly):**
+- `"refresh": "250ms"` — NOT `"5s"`. The 250ms refresh is intentional for real-time data.
+- `"liveNow": false`
+- `"time": {"from": "now-5m", "to": "now"}`
+- `"timepicker": {"refresh_intervals": ["250ms", "500ms", "1s", "5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]}`
+- Open URL with `?refresh=250ms&from=now-5m&to=now` appended
+
+**CRITICAL: Grafana's `min_refresh_interval` defaults to `5s`.** Sub-second
+refresh intervals (250ms, 500ms, 1s) are blocked server-side unless you set
+`GF_DASHBOARDS_MIN_REFRESH_INTERVAL=250ms` when starting Grafana. This is
+already set in the Docker run command in the Execution Scenarios above.
+Without it, the dashboard JSON `"refresh": "250ms"` and URL `?refresh=250ms`
+are silently ignored, and the dropdown won't show sub-5s options.
+
 **Target structure for every panel query:**
 ```json
 {
@@ -673,14 +747,34 @@ cause `json: cannot unmarshal string into Go struct field Query.format`. Grafana
 JSON export shows `"table"` (string) but the API POST requires `1` (integer).
 
 ```python
-import json, requests
+import json, subprocess, sys, requests
 
 GRAFANA_URL = "http://localhost:3000"
-GRAFANA_AUTH = ("admin", "YOUR_PASSWORD")
+GRAFANA_AUTH = ("admin", "admin")
 
-# Find QuestDB datasource UID
-ds = requests.get(f"{GRAFANA_URL}/api/datasources", auth=GRAFANA_AUTH).json()
-questdb_uid = next(d["uid"] for d in ds if d["type"] == "questdb-questdb-datasource")
+# --- Create or find QuestDB datasource ---
+# QuestDB plugin uses jsonData fields, NOT the standard url field.
+# server = hostname only (no port, no protocol), port = integer, tlsMode = "disable"
+ds_list = requests.get(f"{GRAFANA_URL}/api/datasources", auth=GRAFANA_AUTH).json()
+existing = [d for d in ds_list if d["type"] == "questdb-questdb-datasource"]
+if existing:
+    questdb_uid = existing[0]["uid"]
+else:
+    resp = requests.post(f"{GRAFANA_URL}/api/datasources", auth=GRAFANA_AUTH,
+        json={
+            "name": "QuestDB", "type": "questdb-questdb-datasource", "access": "proxy",
+            "jsonData": {
+                "server": "host.docker.internal",
+                "port": 8812,
+                "username": "admin",
+                "tlsMode": "disable",
+                "timeout": "120",
+                "queryTimeout": "60",
+            },
+            "secureJsonData": {"password": "quest"},
+        })
+    questdb_uid = resp.json()["datasource"]["uid"]
+
 DS_REF = {"uid": questdb_uid, "type": "questdb-questdb-datasource"}
 
 dashboard = {
@@ -688,7 +782,7 @@ dashboard = {
         "title": "Crypto Real-Time Market Data",
         "uid": "crypto-realtime",
         "timezone": "browser",
-        "refresh": "250ms",
+        "refresh": "250ms",  # Default refresh rate — do NOT change to 5s
         "liveNow": False,
         "schemaVersion": 38,
         "time": {"from": "now-5m", "to": "now"},
@@ -812,11 +906,10 @@ dashboard = {
 
 resp = requests.post(f"{GRAFANA_URL}/api/dashboards/db", auth=GRAFANA_AUTH,
                      headers={"Content-Type": "application/json"}, json=dashboard)
-url = f"{GRAFANA_URL}{resp.json().get('url', '')}"
+url = f"{GRAFANA_URL}{resp.json().get('url', '')}?refresh=250ms&from=now-5m&to=now"
 print(f"Dashboard: {resp.status_code} - {url}")
 
-# Open in browser
-import subprocess, sys
+# Open in browser — the URL above already has all params, do not modify it
 subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
 ```
 
