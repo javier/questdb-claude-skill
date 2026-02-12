@@ -25,7 +25,7 @@ description: >
 - Do NOT read extra reference files for topics already covered in this skill file
 - DO read reference files when their topic applies (e.g. enterprise.md for auth, grafana-advanced.md for complex panels)
 - Do NOT use task tracking (TaskCreate/TaskUpdate) for straightforward builds
-- Do NOT add `sleep` commands to wait for data or check background processes
+- Do NOT add `sleep` commands to wait for data or check background processes (exception: the 2s delay before browser open in the deploy script is intentional)
 - Do NOT set dashboard refresh to `"5s"` — the default is `"250ms"`
 - When opening the dashboard URL in the browser, ALWAYS append `?refresh=250ms` to the URL. Without this, Grafana ignores the JSON refresh setting.
 - All API details for cryptofeed, QuestDB ingestion, and Grafana are below — use them as-is
@@ -909,9 +909,10 @@ resp = requests.post(f"{GRAFANA_URL}/api/dashboards/db", auth=GRAFANA_AUTH,
 url = f"{GRAFANA_URL}{resp.json().get('url', '')}?refresh=250ms&from=now-5m&to=now"
 print(f"Dashboard: {resp.status_code} - {url}")
 
-# Open in browser — the URL above already has all params, do not modify it
+# Open in browser — short delay lets cryptofeed ingest initial data for dropdowns
+import time; time.sleep(2)
 subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
 ```
 
 Always reference the datasource by UID and type, never by display name.
-Do NOT add `sleep` commands to wait for data — deploy and move on.
+Do NOT add extra `sleep` commands beyond the 2s browser delay already in the script.
