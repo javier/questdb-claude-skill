@@ -1,8 +1,26 @@
 # questdb-claude-skill
 
-QuestDB Claude Skill. Experimental
+QuestDB skill for AI coding agents. Experimental.
 
-Try it out with this prompt:
+Works with both **Claude Code** and **Codex**.
+
+## Installation
+
+Copy the `questdb/` folder into any of these locations so your agent picks it up:
+
+**Claude Code:**
+- `~/.claude/skills/questdb/` - available in all projects
+- `<project>/.claude/skills/questdb/` - available in a specific project
+
+**Codex:**
+- `~/.codex/skills/questdb/` - available in all projects
+- `<project>/.codex/skills/questdb/` - available in a specific project
+
+The folder must contain `SKILL.md` and the `references/` directory.
+
+## Try it out
+
+With this prompt:
 
 ```
 I have QuestDB and Grafana running locally with default ports. Grafana password is YOUR_PASSWORD.
