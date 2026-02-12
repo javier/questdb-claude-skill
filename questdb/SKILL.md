@@ -21,11 +21,15 @@ description: >
 - Do NOT explore library source code (cryptofeed, questdb, etc.)
 - Do NOT check library versions or verify callback signatures
 - Do NOT read installed package files to "understand the API"
-- Do NOT verify infrastructure is running — trust the user's prompt
+- Do NOT verify infrastructure (Docker containers, Grafana health) is running — trust the user's prompt
+- Do NOT start `02_ingest.py` separately — `03_dashboard.py` launches it and verifies data automatically
 - Do NOT read extra reference files for topics already covered in this skill file
 - DO read reference files when their topic applies (e.g. enterprise.md for auth, grafana-advanced.md for complex panels)
 - Do NOT use task tracking (TaskCreate/TaskUpdate) for straightforward builds
-- Do NOT add `sleep` commands to wait for data or check background processes (exception: the 2s delay before browser open in the deploy script is intentional)
+- Do NOT add `sleep` commands to wait for data or check background processes (the deploy script handles this)
+- Do NOT Ctrl+C, restart, or re-launch the ingestion process once `03_dashboard.py` has started it
+- Do NOT put VWAP, Bollinger, or RSI in separate timeseries panels — they are refIDs on the OHLC candlestick panel
+- Do NOT omit or empty `fieldConfig.overrides` — they put RSI on a right Y-axis (0-100%) and spread on a right axis. Without them, different scales crush the chart flat.
 - Do NOT set dashboard refresh to `"5s"` — the default is `"250ms"`
 - When opening the dashboard URL in the browser, ALWAYS append `?refresh=250ms` to the URL. Without this, Grafana ignores the JSON refresh setting.
 - All API details for cryptofeed, QuestDB ingestion, and Grafana are below — use them as-is
@@ -58,8 +62,11 @@ python3 -m venv .venv && .venv/bin/pip install -q cryptofeed questdb psycopg[bin
   .venv/bin/pip uninstall uvloop -y 2>/dev/null &
 wait
 ```
-Then configure the datasource (wait for Grafana first):
+Then wait for both services before proceeding:
 ```bash
+# Wait for QuestDB (HTTP API on 9000) — must be ready before schema/ingestion
+for i in $(seq 1 30); do curl -sf "http://localhost:9000/exec?query=SELECT+1" > /dev/null && break; sleep 1; done
+# Wait for Grafana
 for i in $(seq 1 30); do curl -sf http://localhost:3000/api/health > /dev/null && break; sleep 1; done
 curl -s -X POST http://localhost:3000/api/datasources \
   -u admin:admin -H "Content-Type: application/json" \
@@ -515,11 +522,15 @@ async def trade_cb(t, receipt_timestamp):
     # flush periodically or use auto_flush_interval in conf string
 ```
 
+**Execution order (mandatory — do not reorder):**
+1. Run `01_schema.py` — create tables and views
+2. Run `03_dashboard.py` — this script starts ingestion automatically, waits for data,
+   then deploys the dashboard and opens the browser. Do not start `02_ingest.py` separately.
+- **Do not Ctrl+C, restart, or otherwise touch the ingestion process once it is started.**
+- **Definition of done:** Dashboard is open in browser AND ingestion process is still running.
+
 **Operational notes:**
 - cryptofeed logs to **stderr**, not stdout. An empty stdout does not mean failure.
-  Verify data flow by querying QuestDB: `SELECT count() FROM trades`
-- When building the pipeline, write 3 files (schema, ingestion, dashboard deploy)
-  and run them sequentially. Schema must exist before ingestion starts.
 - End the dashboard deploy script with `open` (macOS) or `xdg-open` (Linux)
   to launch the browser automatically. **Include `?refresh=250ms` in the URL**
   so the dashboard opens with the correct refresh rate:
@@ -715,8 +726,19 @@ Complete working deployment script. This dashboard JSON is tested and working
 — copy the structure exactly for all panels. Do not split or reorganize panels.
 
 **Panel layout rule:** VWAP, Bollinger Bands, and RSI are ALWAYS overlaid on an
-OHLC candlestick panel (multiple refIDs, `includeAllFields: true`). Never put
-them in separate timeseries panels.
+OHLC candlestick panel as additional refIDs (B, C, D) with `includeAllFields: true`.
+The panel type MUST be `candlestick`, not `timeseries`. Creating separate
+timeseries panels for these indicators is wrong — they go on the candlestick panel.
+**Query pattern:** refId A returns OHLC columns (open, high, low, close, volume).
+refIds B, C, D each return `ts AS time` + their indicator column(s) ONLY — not OHLC.
+Grafana overlays them using the shared time column. If an indicator query returns
+OHLC columns too, the candlestick rendering breaks.
+
+**Overrides are mandatory, not cosmetic.** RSI (0-100) on the same Y-axis as
+price (~97,000) makes candlesticks invisible. Spread (~0.01) on the same axis
+as bid/ask (~97,000) makes the spread line invisible. Copy the `fieldConfig.overrides`
+arrays from the template exactly — especially RSI's right axis (0-100%) and
+spread's right axis.
 
 **Dashboard defaults (copy exactly):**
 - `"refresh": "250ms"` — NOT `"5s"`. The 250ms refresh is intentional for real-time data.
@@ -747,10 +769,52 @@ cause `json: cannot unmarshal string into Go struct field Query.format`. Grafana
 JSON export shows `"table"` (string) but the API POST requires `1` (integer).
 
 ```python
-import json, subprocess, sys, requests
+import json, subprocess, sys, os, requests, time
 
+QUESTDB_URL = "http://localhost:9000"
 GRAFANA_URL = "http://localhost:3000"
 GRAFANA_AUTH = ("admin", "admin")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# --- Start ingestion if not already running ---
+already_running = False
+try:
+    resp = requests.get(f"{QUESTDB_URL}/exec",
+        params={"query": "SELECT count() FROM trades WHERE ts > dateadd('s', -10, now())"})
+    already_running = resp.json()["dataset"][0][0] > 0
+except Exception:
+    pass
+
+if already_running:
+    print("Ingestion already running — skipping launch")
+else:
+    ingest_log = open(os.path.join(SCRIPT_DIR, "ingest.log"), "w")
+    ingest_proc = subprocess.Popen(
+        [sys.executable, "-u", os.path.join(SCRIPT_DIR, "02_ingest.py")],
+        stdout=ingest_log, stderr=ingest_log,
+        start_new_session=True,  # detach from parent — survives Ctrl+C and script exit
+    )
+    print(f"Ingestion started: PID {ingest_proc.pid}")
+
+    # --- Gate: wait for data before deploying dashboard ---
+    for i in range(15):  # up to 15s
+        time.sleep(1)
+        if ingest_proc.poll() is not None:
+            ingest_log.close()
+            print("ERROR: Ingestion process died. Log:")
+            print(open(os.path.join(SCRIPT_DIR, "ingest.log")).read())
+            sys.exit(1)
+        try:
+            resp = requests.get(f"{QUESTDB_URL}/exec", params={"query": "SELECT count() FROM trades"})
+            count = resp.json()["dataset"][0][0]
+            if count > 0:
+                print(f"Data gate passed: {count} rows in trades (waited {i+1}s)")
+                break
+        except Exception:
+            pass
+    else:
+        print("ERROR: No data after 15s. Check ingest.log")
+        sys.exit(1)
 
 # --- Create or find QuestDB datasource ---
 # QuestDB plugin uses jsonData fields, NOT the standard url field.
@@ -827,6 +891,11 @@ dashboard = {
                 "datasource": DS_REF,
                 "fieldConfig": {
                     "defaults": {"custom": {"axisBorderShow": False, "axisPlacement": "auto"}},
+                    # CRITICAL: these overrides are NOT cosmetic — without them:
+                    # - RSI (0-100) shares Y-axis with price (~97000) → candlesticks appear flat
+                    # - Volume distorts the price axis
+                    # - Bollinger bands have no visual distinction from price lines
+                    # Copy ALL overrides below exactly. NEVER use "overrides": []
                     "overrides": [
                         {"matcher": {"id": "byName", "options": "volume"},
                          "properties": [{"id": "custom.axisPlacement", "value": "hidden"}]},
@@ -858,20 +927,24 @@ dashboard = {
                     "fields": {"open": "open", "high": "high", "low": "low",
                                "close": "close", "volume": "volume"},
                 },
+                # --- Overlay pattern: refId A = OHLC columns, B/C/D = one indicator each ---
+                # A MUST return: open, high, low, close, volume (for the candlestick)
+                # B/C/D MUST return: ts AS time + indicator columns ONLY (not OHLC)
+                # Grafana overlays B/C/D on A using the shared time column
                 "targets": [
-                    {
+                    {   # A: OHLC + volume — the candlestick data
                         "refId": "A", "datasource": DS_REF, "format": 1,
                         "rawSql": "SELECT ts AS time, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s;",
                     },
-                    {
+                    {   # B: VWAP only — overlays on candlestick
                         "refId": "B", "datasource": DS_REF, "format": 1,
                         "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s), vwap AS (SELECT ts, sum((high + low + close) / 3 * volume) OVER (ORDER BY ts CUMULATIVE) / sum(volume) OVER (ORDER BY ts CUMULATIVE) AS vwap FROM ohlc) SELECT ts AS time, vwap FROM vwap;",
                     },
-                    {
+                    {   # C: Bollinger Bands only (sma20, upper_band, lower_band)
                         "refId": "C", "datasource": DS_REF, "format": 1,
                         "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s), stats AS (SELECT ts, close, AVG(close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS sma20, AVG(close * close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS avg_close_sq FROM ohlc) SELECT ts AS time, sma20, sma20 + 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS upper_band, sma20 - 2 * sqrt(avg_close_sq - (sma20 * sma20)) AS lower_band FROM stats;",
                     },
-                    {
+                    {   # D: RSI only — right Y-axis 0-100%
                         "refId": "D", "datasource": DS_REF, "format": 1,
                         "rawSql": "WITH ohlc AS (SELECT ts, symbol, first(price) AS open, max(price) AS high, min(price) AS low, last(price) AS close, sum(amount) AS volume FROM trades WHERE $__timeFilter(ts) AND symbol = '$symbol' SAMPLE BY 5s), changes AS (SELECT ts, close, close - LAG(close) OVER (ORDER BY ts) AS change FROM ohlc), gains_losses AS (SELECT ts, close, CASE WHEN change > 0 THEN change ELSE 0 END AS gain, CASE WHEN change < 0 THEN ABS(change) ELSE 0 END AS loss FROM changes), avg_gl AS (SELECT ts, close, AVG(gain) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_gain, AVG(loss) OVER (ORDER BY ts ROWS BETWEEN 13 PRECEDING AND CURRENT ROW) AS avg_loss FROM gains_losses) SELECT ts AS time, CASE WHEN avg_loss = 0 THEN 100 ELSE 100 - (100 / (1 + avg_gain / NULLIF(avg_loss, 0))) END AS rsi FROM avg_gl;",
                     },
@@ -882,6 +955,8 @@ dashboard = {
                 "title": "Bid-Ask Spread - $symbol",
                 "gridPos": {"h": 6, "w": 24, "x": 0, "y": 20},
                 "datasource": DS_REF,
+                # CRITICAL: overrides REQUIRED — without them spread (~0.01) is invisible
+                # next to bid/ask (~97000). Spread MUST use right Y-axis.
                 "fieldConfig": {
                     "defaults": {"custom": {"lineWidth": 1, "fillOpacity": 15, "spanNulls": True, "pointSize": 1}},
                     "overrides": [
@@ -909,10 +984,9 @@ resp = requests.post(f"{GRAFANA_URL}/api/dashboards/db", auth=GRAFANA_AUTH,
 url = f"{GRAFANA_URL}{resp.json().get('url', '')}?refresh=250ms&from=now-5m&to=now"
 print(f"Dashboard: {resp.status_code} - {url}")
 
-# Open in browser — short delay lets cryptofeed ingest initial data for dropdowns
-import time; time.sleep(2)
+# Open in browser — data gate already confirmed rows are flowing
 subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", url])
 ```
 
 Always reference the datasource by UID and type, never by display name.
-Do NOT add extra `sleep` commands beyond the 2s browser delay already in the script.
+Do NOT add extra `sleep` commands — the data gate loop handles all waiting.
