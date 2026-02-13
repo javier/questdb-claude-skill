@@ -1,4 +1,4 @@
-# questdb-claude-skill
+# questdb-agent-skill
 
 QuestDB skill for AI coding agents. Experimental.
 
