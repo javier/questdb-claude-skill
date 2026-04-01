@@ -60,8 +60,8 @@ Please start grafana and questdb (latest images) using docker and configure a da
   commands, or to start docker images and check status.
 ```
 
+You can then follow up with:
 
-you can then follow up with
 ```
 what other indicators can I add to the dashboard for this dataset?
 ```
@@ -97,10 +97,9 @@ VWAP
 
 You can just ask claude to add any indicators it suggests.
 
-When done, if you want to destroy everythinf you can ask
+When done, if you want to destroy everything, you can ask
 
 ```
 please, stop ingestion, remove all the images, containers, view, tables, and local artifacts you created in this session,
   including the feedhandler log file, so we can restart from scratch
 ```
-
