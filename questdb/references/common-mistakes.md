@@ -11,14 +11,14 @@ QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
 | ❌ Don't | ✅ Do Instead | Why |
 |---|---|---|
 | `GROUP BY time_bucket('5m', ts)` | `SAMPLE BY 5m` | `time_bucket()` does not exist. SAMPLE BY is QuestDB's time aggregation. |
-| `date_trunc('hour', ts)` | `timestamp_floor('1h', ts)` or `SAMPLE BY 1h` | `date_trunc()` does not exist. Use `timestamp_floor()` for expressions or SAMPLE BY for aggregation. |
-| `generate_series(...)` | Use TICK bracket expansion or a helper table | `generate_series()` does not exist. |
+| `date_trunc('hour', ts)` | `timestamp_floor('1h', ts)` or `SAMPLE BY 1h` | `date_trunc()` exists but prefer `timestamp_floor()` (accepts interval literals like `'1h'` instead of unit strings) or `SAMPLE BY` for time-bucketed aggregation. |
+| `generate_series(1, 1000)` for time ranges | Use TICK syntax: `WHERE ts IN '$today - 5bd..$today'` | `generate_series()` exists but prefer TICK bracket expansion for time intervals - it generates optimized interval scans. `generate_series` is fine for non-temporal integer sequences. |
 | `SELECT DISTINCT ON (symbol) ...` | `SELECT * FROM t LATEST ON ts PARTITION BY symbol` | `DISTINCT ON` does not exist. LATEST ON is purpose-built and much faster. |
 | `... HAVING avg(price) > 100` | CTE + `WHERE` on outer query | `HAVING` does not exist. Wrap in CTE/subquery, filter outside. |
 | `... QUALIFY row_number() OVER (...) = 1` | CTE + `WHERE` on outer query | `QUALIFY` does not exist. Filter window results via CTE. |
 | `INTERVAL '1 hour'` | `'1h'` or use `dateadd('h', 1, ts)` | PostgreSQL interval literals are not supported. |
 | `ts >= NOW() - INTERVAL '1 day'` | `WHERE ts IN '$now - 1d..$now'` | Use TICK syntax for time ranges. |
-| `BETWEEN '2025-01-01' AND '2025-01-31'` | `WHERE ts IN '2025-01-[01..31]'` | TICK is preferred. BETWEEN works but TICK is more expressive. |
+| `BETWEEN '2025-01-01' AND '2025-01-31'` | `WHERE ts IN '[2025-01]'` | TICK is preferred. Use imprecise month-level dates instead of `[01..31]` bracket ranges. BETWEEN works but TICK is more expressive. |
 | `ORDER BY ts ASC NULLS LAST` | `ORDER BY ts ASC` | `NULLS FIRST/LAST` is not supported. |
 | `STRING` or `TEXT` | `VARCHAR` or `SYMBOL` | Use `VARCHAR` for unique strings, `SYMBOL` for repeated low-cardinality strings. |
 | `BOOLEAN` column type | `BOOLEAN` exists but use with care | Supported, but prefer `SYMBOL` for filterable flag columns in high-volume tables. |
