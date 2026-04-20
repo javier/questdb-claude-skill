@@ -431,21 +431,30 @@ WHERE ts IN '$now - 5bd..$now'           -- last 5 business days (skips weekends
 WHERE ts IN '$now;1h'                    -- 1 hour starting now (forward)
 WHERE ts IN '2025-01-15T09:30;6h30m'     -- NYSE trading session
 
+-- Imprecise dates: month-level and year-level (expand to all days)
+WHERE ts IN '[2025-01]'                  -- all of January (no need for [01..31])
+WHERE ts IN '[2025]T09:30'              -- all of 2025 at 09:30
+WHERE ts IN '2025-02T09:30'             -- bare imprecise (brackets optional alone)
+
 -- Bracket expansion: generates multiple intervals
 WHERE ts IN '2025-01-[10..15]'           -- days 10 through 15
 WHERE ts IN '2025-01-[5,10..12,20]'      -- specific days + ranges
 WHERE ts IN '2025-[01,06]-[10,15]'       -- Cartesian: Jan+Jun x 10th+15th
+WHERE ts IN '2025-[01..03]T09:30'        -- month-level range: all days Jan-Mar
 
 -- Day-of-week filters
-WHERE ts IN '2025-01-[01..31]#workday'             -- weekdays only
-WHERE ts IN '2025-01-[01..31]#weekend'             -- weekends only
-WHERE ts IN '2025-01-[01..31]#Mon,Wed,Fri'         -- specific days
+WHERE ts IN '[2025-01]#workday'          -- weekdays in January
+WHERE ts IN '[2025-01]#weekend'          -- weekends in January
+WHERE ts IN '[2025-01]#Mon,Wed,Fri'      -- specific days in January
 
 -- Timezone-aware (handles DST)
 WHERE ts IN '2025-01-15T09:30@America/New_York;6h30m'
 
 -- Combined: workdays at 09:30 New York time for all of January
-WHERE ts IN '2025-01-[01..31]T09:30@America/New_York#workday;6h30m'
+WHERE ts IN '[2025-01]T09:30@America/New_York#workday;6h30m'
+
+-- Mixed-precision date lists
+WHERE ts IN '[2025-01-15, 2025-02]T09:30'  -- one day + full month
 
 -- Time lists: multiple intraday windows
 WHERE ts IN '2025-01-15T[09:00,14:30];1h'  -- two 1h windows on the same day
@@ -464,14 +473,18 @@ WHERE ts IN '2025-W01-[1..5]T09:00;8h'  -- Mon-Fri of week 1
 - Arithmetic units: `y` `M` `w` `d` `bd` `h` `m` `s` `T`(ms) `u`(us) `n`(ns).
   `bd` (business days) is valid in arithmetic only, not in durations.
   Case-sensitive: `M` = months, `m` = minutes, `T` = milliseconds.
+- **Imprecise dates:** `YYYY-MM` expands to all days in that month, `YYYY` to
+  all days in that year. `'[2025-01]T09:30#workday;6h30m'` replaces the verbose
+  `'2025-01-[01..31]T09:30#workday;6h30m'`. Brackets optional when used alone
+  (`'2025-02T09:30'` = `'[2025-02]T09:30'`), required in lists.
 - Brackets required for: lists (`[$today, $yesterday]`), ranges with suffixes
-  (`[$now - 2h..$now]@America/New_York`). Optional for standalone variables and
-  bare ranges (`$now - 2h..$now`).
+  (`[$now - 2h..$now]@America/New_York`). Optional for standalone variables,
+  bare ranges (`$now - 2h..$now`), and bare imprecise dates (`2025-01T09:30`).
 - Overlapping intervals from bracket expansion are auto-merged.
 - **Exchange calendars (Enterprise):** use `#XNYS`, `#XLON`, etc. (ISO 10383 MIC
   codes) instead of `#workday` to filter by real exchange trading schedules -
   holidays, early closes, and lunch breaks are handled automatically.
-  `WHERE ts IN '2025-01-[01..31]#XNYS'` gives only NYSE trading sessions.
+  `WHERE ts IN '[2025-01]#XNYS'` gives only NYSE trading sessions.
   See: `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/operators/exchange-calendars.md"`
 
 Full reference: `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/operators/tick.md"`

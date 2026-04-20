@@ -18,7 +18,7 @@ QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
 | `... QUALIFY row_number() OVER (...) = 1` | CTE + `WHERE` on outer query | `QUALIFY` does not exist. Filter window results via CTE. |
 | `INTERVAL '1 hour'` | `'1h'` or use `dateadd('h', 1, ts)` | PostgreSQL interval literals are not supported. |
 | `ts >= NOW() - INTERVAL '1 day'` | `WHERE ts IN '$now - 1d..$now'` | Use TICK syntax for time ranges. |
-| `BETWEEN '2025-01-01' AND '2025-01-31'` | `WHERE ts IN '2025-01-[01..31]'` | TICK is preferred. BETWEEN works but TICK is more expressive. |
+| `BETWEEN '2025-01-01' AND '2025-01-31'` | `WHERE ts IN '[2025-01]'` | TICK is preferred. Use imprecise month-level dates instead of `[01..31]` bracket ranges. BETWEEN works but TICK is more expressive. |
 | `ORDER BY ts ASC NULLS LAST` | `ORDER BY ts ASC` | `NULLS FIRST/LAST` is not supported. |
 | `STRING` or `TEXT` | `VARCHAR` or `SYMBOL` | Use `VARCHAR` for unique strings, `SYMBOL` for repeated low-cardinality strings. |
 | `BOOLEAN` column type | `BOOLEAN` exists but use with care | Supported, but prefer `SYMBOL` for filterable flag columns in high-volume tables. |
