@@ -1,139 +1,175 @@
-# QuestDB Common Mistakes
+# QuestDB Cookbook Recipe Index
 
-This is the most critical reference in the skill. Every row represents a pattern
-that LLMs frequently hallucinate because they exist in PostgreSQL but NOT in
-QuestDB, or because QuestDB's syntax differs from what an LLM would guess.
+Pointers to official SQL recipes in the QuestDB docs. **Every recipe is fetchable
+as plain markdown** by appending `.md` to its URL — no HTML, no scraping.
 
-**Read this before writing any QuestDB SQL.**
+```bash
+# Fetch any recipe
+curl -sH "Accept: text/markdown" "https://questdb.com/docs/cookbook/sql/finance/markout.md"
 
-## SQL Syntax Mistakes
+# Fetch the finance cookbook index page
+curl -sH "Accept: text/markdown" "https://questdb.com/docs/cookbook/sql/finance.md"
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `GROUP BY time_bucket('5m', ts)` | `SAMPLE BY 5m` | `time_bucket()` does not exist. SAMPLE BY is QuestDB's time aggregation. |
-| `date_trunc('hour', ts)` | `timestamp_floor('1h', ts)` or `SAMPLE BY 1h` | `date_trunc()` does not exist. Use `timestamp_floor()` for expressions or SAMPLE BY for aggregation. |
-| `generate_series(...)` | Use TICK bracket expansion or a helper table | `generate_series()` does not exist. |
-| `SELECT DISTINCT ON (symbol) ...` | `SELECT * FROM t LATEST ON ts PARTITION BY symbol` | `DISTINCT ON` does not exist. LATEST ON is purpose-built and much faster. |
-| `... HAVING avg(price) > 100` | CTE + `WHERE` on outer query | `HAVING` does not exist. Wrap in CTE/subquery, filter outside. |
-| `... QUALIFY row_number() OVER (...) = 1` | CTE + `WHERE` on outer query | `QUALIFY` does not exist. Filter window results via CTE. |
-| `INTERVAL '1 hour'` | `'1h'` or use `dateadd('h', 1, ts)` | PostgreSQL interval literals are not supported. |
-| `ts >= NOW() - INTERVAL '1 day'` | `WHERE ts IN '$now - 1d..$now'` | Use TICK syntax for time ranges. |
-| `BETWEEN '2025-01-01' AND '2025-01-31'` | `WHERE ts IN '2025-01-[01..31]'` | TICK is preferred. BETWEEN works but TICK is more expressive. |
-| `ORDER BY ts ASC NULLS LAST` | `ORDER BY ts ASC` | `NULLS FIRST/LAST` is not supported. |
-| `STRING` or `TEXT` | `VARCHAR` or `SYMBOL` | Use `VARCHAR` for unique strings, `SYMBOL` for repeated low-cardinality strings. |
-| `BOOLEAN` column type | `BOOLEAN` exists but use with care | Supported, but prefer `SYMBOL` for filterable flag columns in high-volume tables. |
-| `ALTER TABLE ... ADD CONSTRAINT` | Not supported | QuestDB has no constraints, foreign keys, or unique indexes. Use DEDUP for uniqueness. |
-| `CREATE INDEX ON ...` | Not needed | QuestDB auto-indexes designated timestamp and SYMBOL columns. No manual index creation. |
-| `UPSERT` / `ON CONFLICT` | `DEDUP UPSERT KEYS(...)` on CREATE TABLE | Dedup is declared at table creation, not at query time. |
+# Full docs index (every page with its .md URL)
+curl -s "https://questdb.com/docs/llms.txt"
+```
 
-## SAMPLE BY Mistakes
+Use `llms.txt` to discover any page. Every regular doc URL has a `.md` twin at
+the same path — this is the authoritative, LLM-friendly way to read QuestDB docs.
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `SAMPLE BY '5 minutes'` | `SAMPLE BY 5m` | Units are single-letter suffixes: `s`, `m`, `h`, `d`, `M`, `y`. No quotes, no spelled-out words. |
-| `SAMPLE BY 5m` without designated timestamp | Add `TIMESTAMP(col)` to CREATE TABLE | SAMPLE BY requires a designated timestamp on the table. |
-| `SAMPLE BY 5m FILL(PREV) ALIGN TO CALENDAR` | `SAMPLE BY 5m FILL(PREV)` | FILL goes at the end, after SAMPLE BY (and after ALIGN TO CALENDAR if explicitly used). |
-| `SELECT non_agg_col ... SAMPLE BY` without it being the timestamp | Aggregate or remove the column | Non-aggregated, non-timestamp columns in SAMPLE BY cause errors. Only the designated timestamp and aggregated expressions are valid. |
-| Window functions + SAMPLE BY in same SELECT | Subquery: SAMPLE BY inside, window outside | Cannot mix window functions and SAMPLE BY at the same query level. |
+---
 
-## Materialized View Mistakes
+## Finance / Capital Markets Recipes
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `CREATE MATERIALIZED VIEW ... AS (...) REFRESH EVERY 5m` | `CREATE MATERIALIZED VIEW ... REFRESH EVERY 5m AS (...)` | REFRESH clause goes BEFORE AS, not after. |
-| `INSERT INTO mat_view ...` | Insert into the BASE table | Never write directly to a materialized view. It refreshes from its source automatically. |
-| `DROP TABLE mat_view` | `DROP MATERIALIZED VIEW mat_view` | Materialized views have their own DROP syntax. |
-| `WITH BASE` on single-table views | Remove `WITH BASE` | WITH BASE is only needed for JOINs — it tells QuestDB which table triggers refresh. |
-| Expecting cascading views to rebuild on backfill | Cascade from base → fine → coarse | Views only refresh on new inserts to the immediate source. Plan the cascade direction accordingly. |
+Index: https://questdb.com/docs/cookbook/sql/finance.md
 
-## Window Function Mistakes
+All paths below are relative to `https://questdb.com/docs/` — e.g. the full URL
+for markout is `https://questdb.com/docs/cookbook/sql/finance/markout.md`.
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `WHERE row_num = 1` in same query as `ROW_NUMBER() OVER (...) AS row_num` | CTE: compute window in inner query, filter in outer | Cannot filter on window function results in the same query level. |
-| `GROUP BY symbol` + `avg(...) OVER (...)` in same SELECT | Subquery: GROUP BY inside, window outside | Cannot mix GROUP BY/SAMPLE BY with window functions at same level. |
-| Manual EMA: `price * 2/(n+1) + prev * (1 - 2/(n+1))` | `avg(price, 'period', 20) OVER (...)` | QuestDB has native EMA. Don't implement manually. |
-| `avg(computed_col, 'period', N) OVER (...)` on a CTE column | `AVG(computed_col) OVER (ORDER BY ts ROWS BETWEEN N-1 PRECEDING AND CURRENT ROW)` | EMA (`avg` with `'period'`) may fail on computed/CTE columns. Use SMA with explicit ROWS BETWEEN as fallback. |
-| `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for running total | `sum(col) OVER (ORDER BY ts CUMULATIVE)` | QuestDB has a `CUMULATIVE` shorthand. Either syntax works, but CUMULATIVE is cleaner. |
-| `SELECT ts AS time, ... OVER (ORDER BY ts ...)` | Put all OVER() in CTEs where `ts` is unaliased. Final SELECT only does `ts AS time` with no OVER. | Once `ts` is aliased as `time`, OVER in the same SELECT cannot reference `ts`. Move window functions to CTEs. |
+### Price-Based Indicators
+| Recipe | Path | Description |
+|--------|------|-------------|
+| OHLC Aggregation | `cookbook/sql/finance/ohlc.md` | Aggregate tick data into candlestick bars |
+| VWAP | `cookbook/sql/finance/vwap.md` | Volume-Weighted Average Price |
+| TWAP | `cookbook/sql/finance/twap.md` | Time-Weighted Average Price |
+| Bollinger Bands | `cookbook/sql/finance/bollinger-bands.md` | Price channels based on standard deviation |
+| Bollinger BandWidth | `cookbook/sql/finance/bollinger-bandwidth.md` | Measure band expansion and contraction |
 
-## TICK Syntax Mistakes
+### Momentum Indicators
+| Recipe | Path | Description |
+|--------|------|-------------|
+| RSI | `cookbook/sql/finance/rsi.md` | Relative Strength Index for overbought/oversold |
+| MACD | `cookbook/sql/finance/macd.md` | Moving Average Convergence Divergence |
+| Stochastic Oscillator | `cookbook/sql/finance/stochastic.md` | Close vs. price range |
+| Rate of Change | `cookbook/sql/finance/rate-of-change.md` | Percentage price change over N periods |
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `WHERE ts >= dateadd('h', -1, now())` | `WHERE ts IN '$now - 1h..$now'` | TICK is preferred for time ranges. More readable and optimized. |
-| `WHERE ts IN '$now - 1 hour'` | `WHERE ts IN '$now - 1h'` | TICK units are single-letter: `h` not `hour`. |
-| `WHERE ts IN $now - 1h` (no quotes) | `WHERE ts IN '$now - 1h..$now'` | TICK expressions must be in single quotes. Range requires `..` between start and end. |
-| `WHERE ts = '$today'` | `WHERE ts IN '$today'` | Use `IN` not `=` for TICK expressions. |
-| `WHERE ts IN '$now - 5 business days'` | `WHERE ts IN '$now - 5bd..$now'` | Business days use `bd` suffix. |
+### Volatility Indicators
+| Recipe | Path | Description |
+|--------|------|-------------|
+| ATR | `cookbook/sql/finance/atr.md` | Average True Range |
+| Rolling Std Dev | `cookbook/sql/finance/rolling-stddev.md` | Moving stddev of returns |
+| Donchian Channels | `cookbook/sql/finance/donchian-channels.md` | High/low price channels |
+| Keltner Channels | `cookbook/sql/finance/keltner-channels.md` | EMA-based volatility channels |
+| Realized Volatility | `cookbook/sql/finance/realized-volatility.md` | Historical volatility from returns |
 
-## Array Mistakes
+### Volume & Order Flow
+| Recipe | Path | Description |
+|--------|------|-------------|
+| OBV | `cookbook/sql/finance/obv.md` | On-Balance Volume |
+| Volume Profile | `cookbook/sql/finance/volume-profile.md` | Volume distribution by price level |
+| Volume Spike | `cookbook/sql/finance/volume-spike.md` | Detect abnormal volume |
+| Aggressor Imbalance | `cookbook/sql/finance/aggressor-volume-imbalance.md` | Buy vs sell pressure |
+| VPIN | `cookbook/sql/finance/vpin.md` | Volume-synchronized informed trading probability |
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `bids[0]` | `bids[1]` | QuestDB arrays are **1-indexed**. `[1]` is the first element. |
-| `bids[0][0]` for best bid price | `bids[1][1]` | 2D: `bids[1]` = prices array, `bids[2]` = sizes array. `bids[1][1]` = best bid price. |
-| Python: `columns={'bids': [[41999.0], [2.1]]}` | `columns={'bids': [np.array([41999.0], dtype=np.float64), np.array([2.1], dtype=np.float64)]}` | ILP client requires numpy arrays with explicit `np.float64` dtype, not Python lists. |
-| `DOUBLE[]` for order book | `DOUBLE[][]` (2D) | Use 2D arrays: dimension 1 = prices, dimension 2 = sizes. |
+### Risk Metrics
+| Recipe | Path | Description |
+|--------|------|-------------|
+| Maximum Drawdown | `cookbook/sql/finance/maximum-drawdown.md` | Peak-to-trough decline |
 
-## Ingestion Mistakes
+### Market Microstructure
+| Recipe | Path | Description |
+|--------|------|-------------|
+| Bid-Ask Spread | `cookbook/sql/finance/bid-ask-spread.md` | Spread metrics |
+| Gamma Scalping Signal | `cookbook/sql/finance/gamma-scalping-signal.md` | Vol-spread ratio |
+| Liquidity Comparison | `cookbook/sql/finance/liquidity-comparison.md` | Compare liquidity across instruments |
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `INSERT INTO trades VALUES (...)` for streaming | Use ILP client (`questdb.ingress.Sender`) | INSERT is slow for streaming. ILP is 10-100x faster and supports batching. |
-| `Sender.from_conf(conf)` then immediately `.row(...)` | Use `with Sender.from_conf(conf) as sender:` | `from_conf()` does not connect. The context manager (or `.establish()`) opens the connection. |
-| `sender.row(... symbols={'price': 42000})` | `columns={'price': 42000.0}` | `symbols={}` is for SYMBOL type columns only (strings). Numeric values go in `columns={}`. |
-| HTTP POST to `/exec` for queries | HTTP GET to `/exec?query=...` | The exec endpoint only accepts GET requests. |
-| `import psycopg2` | `import psycopg as pg` | Use `psycopg` (v3), not `psycopg2`. |
-| `dbname='questdb'` in PG connection | `dbname='qdb'` | QuestDB's database name is `qdb`, not `questdb`. |
-| `sender.flush()` after every row | Batch rows, flush periodically | Flushing per-row kills throughput. Flush every N rows or on a timer. |
-| TCP without `protocol_version=2` when using arrays | `tcp::addr=...;protocol_version=2;` | Array support requires protocol version 2. |
+### Post-Trade Analysis (Execution Quality / TCA)
 
-## Grafana Mistakes
+**These recipes all use `HORIZON JOIN` — the idiomatic QuestDB pattern for
+analysing trade fills against quotes at one or many time offsets. Use them
+(or the patterns in them) rather than hand-rolling ASOF JOIN + self-joins.**
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `WHERE ts >= $__from AND ts <= $__to` | `WHERE $__timeFilter(ts)` | Use the QuestDB datasource macro. It handles the time range correctly. |
-| `SAMPLE BY 1m` (hardcoded) with Grafana | `SAMPLE BY $__interval` | Let Grafana auto-calculate the interval based on the visible time range and panel width. |
-| PostgreSQL datasource for QuestDB | QuestDB datasource plugin (`questdb-questdb-datasource`) | The QuestDB plugin has optimized macros and better compatibility. |
-| `datasource: 'QuestDB'` (by name) in provisioned dashboards | `datasource: { uid: 'questdb-ds-uid', type: 'questdb-questdb-datasource' }` | Always reference datasources by UID and type, not display name. |
-| `"format": "table"` or `"format": "time_series"` (string) in panel targets | `"format": 1` (integer) | QuestDB Grafana plugin uses Go integer enum `sqlutil.FormatQueryOption`. Strings cause unmarshal error. Grafana JSON export shows string but API POST requires integer. |
+| Recipe | Path | Description |
+|--------|------|-------------|
+| Slippage per fill | `cookbook/sql/finance/slippage.md` | Measure execution slippage per fill |
+| Slippage (aggregated) | `cookbook/sql/finance/slippage-aggregated.md` | Compare slippage across venues/counterparties |
+| Markout analysis | `cookbook/sql/finance/markout.md` | Post-trade price reversion and adverse selection |
+| Last-look detection | `cookbook/sql/finance/last-look.md` | Millisecond-granularity markout for last-look |
+| Implementation shortfall | `cookbook/sql/finance/implementation-shortfall.md` | Cost decomposition into effective spread, permanent, and temporary impact (HORIZON JOIN + PIVOT) |
+| Implementation shortfall (order) | `cookbook/sql/finance/implementation-shortfall-order.md` | Total IS per order vs arrival mid |
+| ECN scorecard | `cookbook/sql/finance/ecn-scorecard.md` | Dashboard-style venue comparison |
 
-## Schema Design Mistakes
+### Market Breadth
+| Recipe | Path | Description |
+|--------|------|-------------|
+| TICK & TRIN | `cookbook/sql/finance/tick-trin.md` | Market breadth indicators |
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| `VARCHAR` for ticker symbols | `SYMBOL` | SYMBOL is indexed and optimized for repeated low-cardinality strings. VARCHAR is not indexed. |
-| Table without `TIMESTAMP(col)` | Always designate a timestamp column | Without it, you cannot use SAMPLE BY, LATEST ON, or ASOF JOIN. |
-| Table without `WAL` | Add `WAL` to CREATE TABLE | WAL enables concurrent writes. Without it, only one writer is allowed. |
-| Table without `PARTITION BY` | Add `PARTITION BY DAY` (or appropriate granularity) | Unpartitioned tables cannot use TTL and have worse query performance on large datasets. |
-| Separate `date` and `time` columns | Single `TIMESTAMP` column | QuestDB is optimized for a single designated timestamp. Split date/time prevents using time-series features. |
+### Math Utilities
+| Recipe | Path | Description |
+|--------|------|-------------|
+| Compound Interest | `cookbook/sql/finance/compound-interest.md` | Interest and growth calculations |
+| Cumulative Product | `cookbook/sql/finance/cumulative-product.md` | Running product for returns |
+| Log Returns | `cookbook/sql/finance/log-returns.md` | Log returns from consecutive prices |
 
-## Enterprise Auth Mistakes
+---
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| Skip auth setup on Enterprise | Create user/service account + grants + tokens | Enterprise requires explicit auth. No anonymous access. |
-| `GRANT INSERT` to a user who creates their own tables | Skip it — creator auto-gets all permissions | Creating a table automatically grants full permissions on it to the creator. |
-| `http::` with a REST token on Enterprise | `https::` (note the `s`) | Enterprise with tokens requires TLS. Use `https::` for HTTP, `tcps::` for TCP. |
-| `tcp::` with JWK tokens on Enterprise | `tcps::` (note the `s`) | Same — TLS required for authenticated connections. |
-| Use TCP/ILP without error handling | Prefer HTTP ingestion, or add monitoring for TCP | TCP/ILP does not return errors to the client. Data loss happens silently on disconnect. |
-| Hardcode tokens in source code | Use environment variables or secrets manager | Tokens are sensitive credentials. Pass via `QDB_TOKEN`, `QDB_ILP_USER`, etc. |
-| Pass REST token params to ILP config | REST uses `token=`. ILP uses `username=`, `token=` (private key), `token_x=`, `token_y=`. | REST and JWK tokens have completely different connection string parameters. |
-| Forget `protocol_version=2` with `tcps::` | Always include `protocol_version=2;` in TCP config | Required for array support and modern protocol features, regardless of auth. |
-| `tls_verify=unsafe_off` in production without asking | Ask the user if the server uses a self-signed certificate | Only disable TLS verification for self-signed certs. Never add silently for production. |
-| Omit `tls_verify=unsafe_off` with self-signed certs | Add `tls_verify=unsafe_off;` to the connection string | Without it, the client will reject the self-signed certificate and fail to connect. |
+## Time-Series Patterns
 
-## Grafana Dashboard Mistakes
+Common time-series operations that LLMs frequently get wrong because they reach
+for PostgreSQL patterns that don't exist in QuestDB, or miss QuestDB-native
+features like FILL, LATEST ON, and TICK.
 
-| ❌ Don't | ✅ Do Instead | Why |
-|---|---|---|
-| Duplicate candlestick panels with the same data | Use one candlestick panel with multiple queries (refIDs) and `includeAllFields: true` for overlays like VWAP/Bollinger | Overlay price-based indicators on candles via refIDs. Separate panels are correct for different chart types (candlestick vs RSI oscillator vs spread). |
-| Use `stddev_samp()` in window functions | Compute manually: `sqrt(avg(x*x) - avg(x)^2)` | `stddev_samp` may not work inside window frames. Manual variance is more compatible. |
-| Use a single time range for all panels | Use per-panel `timeFrom` overrides (e.g. `"1m"`, `"30m"`, `"now/d"`) | Different panels need different ranges: real-time tables need seconds, indicators need hours. |
-| Forget `hideTimeOverride: true` on panels with `timeFrom` | Always set `hideTimeOverride: true` | Otherwise Grafana shows an ugly time override label in the panel title. |
-| Create one panel per symbol manually | Use `repeat: "SYMBOL"` on panels or rows with `repeatDirection: "h"` | Auto-duplicates per symbol. Much cleaner and scales with symbol count. |
-| `SELECT DISTINCT symbol FROM trades` on large tables with stale symbols | Use LATEST ON to filter to symbols with recent data | `DISTINCT` works for fresh pipelines. On large tables with dead symbols, `LATEST ON` avoids returning symbols with no recent data. See grafana-advanced.md. |
-| Reference datasource by name | Always use UID and type: `{"uid": "...", "type": "questdb-questdb-datasource"}` | Names can change. UIDs are stable. |
-| Assume all indicators share the same Y-axis | Use `byFrameRefID` overrides to give RSI its own axis and unit | RSI is 0-100, price is in dollars. They need separate axes. |
+| Recipe | Path | Description |
+|--------|------|-------------|
+| Elapsed time between rows | `cookbook/sql/time-series/elapsed-time.md` | `lag()` + `datediff()` pattern |
+| Force designated timestamp | `cookbook/sql/time-series/force-designated-timestamp.md` | Explicit `TIMESTAMP(col)` in queries |
+| Latest N per partition | `cookbook/sql/time-series/latest-n-per-partition.md` | Window functions for top-N per group |
+| Session windows | `cookbook/sql/time-series/session-windows.md` | Detect state changes, compute elapsed time |
+| Last N minutes of activity | `cookbook/sql/time-series/latest-activity-window.md` | Subquery with `LIMIT -1` |
+| Filter by week number | `cookbook/sql/time-series/filter-by-week.md` | `week_of_year()` vs `dateadd()` |
+| Distribute values across intervals | `cookbook/sql/time-series/distribute-discrete-values.md` | Spread cumulative measurements |
+| Epoch timestamps | `cookbook/sql/time-series/epoch-timestamps.md` | Filtering with epoch values |
+| Right interval bound (SAMPLE BY) | `cookbook/sql/time-series/sample-by-interval-bounds.md` | Shift bucket timestamps to right edge |
+| Remove outliers from candles | `cookbook/sql/time-series/remove-outliers.md` | Window functions vs moving averages |
+| FILL from another column | `cookbook/sql/time-series/fill-from-one-column.md` | Propagate values across columns |
+| FILL PREV with historical data | `cookbook/sql/time-series/fill-prev-with-history.md` | Carry historical values into filtered ranges |
+| FILL on keyed queries | `cookbook/sql/time-series/fill-keyed-arbitrary-interval.md` | Keyed FILL with arbitrary intervals using boundary rows |
+| Sparse sensor join strategies | `cookbook/sql/time-series/sparse-sensor-data.md` | CROSS vs LEFT vs ASOF for multi-sensor data |
 
+## Advanced SQL Patterns
+
+| Recipe | Path | Description |
+|--------|------|-------------|
+| Rows before/after current | `cookbook/sql/advanced/rows-before-after-value-match.md` | LAG/LEAD window functions |
+| Local min/max | `cookbook/sql/advanced/local-min-max.md` | Min/max within a time range around each row |
+| Top N + others | `cookbook/sql/advanced/top-n-plus-others.md` | `rank()` + CASE for grouped results |
+| Pivot with "Others" | `cookbook/sql/advanced/pivot-with-others.md` | CASE-based pivot with catch-all column |
+| Unpivoting | `cookbook/sql/advanced/unpivot-table.md` | Wide to long format via UNION ALL |
+| Conditional aggregates | `cookbook/sql/advanced/conditional-aggregates.md` | Multiple CASE-based aggregates in one query |
+| General + sampled aggregates | `cookbook/sql/advanced/general-and-sampled-aggregates.md` | CROSS JOIN for overall + time-bucketed stats |
+| Histogram buckets | `cookbook/sql/advanced/consistent-histogram-buckets.md` | Fixed-boundary distribution analysis |
+| Arrays from string literals | `cookbook/sql/advanced/array-from-string.md` | Cast strings to array types |
+
+---
+
+## Demo Dataset Reference
+
+The demo instance at `https://demo.questdb.io/` exposes the tables used throughout
+the finance cookbook — fetch the schema reference before writing queries against it:
+
+```bash
+curl -sH "Accept: text/markdown" "https://questdb.com/docs/cookbook/demo-data-schema.md"
+```
+
+Key tables:
+- `fx_trades` — FX trade executions (timestamp, symbol, ecn, side, price, quantity, counterparty, trade_id, order_id)
+- `market_data` — consolidated best bid/ask (timestamp, symbol, best_bid, best_ask)
+- `core_price` — ECN-level quotes (timestamp, symbol, ecn, bid_price, ask_price)
+- `bbo_1s`, `bbo_1m`, `bbo_1h`, `bbo_1d` — BBO snapshot rollups
+- `trades` — crypto trade data (separate from `fx_trades`)
+
+---
+
+## Related Reference Docs
+
+Beyond the cookbook, the query-language docs also have `.md` twins. Fetch these
+when you need exact syntax for a keyword:
+
+- HORIZON JOIN — `query/sql/horizon-join.md`
+- WINDOW JOIN — `query/sql/window-join.md`
+- LATERAL JOIN — `query/sql/lateral-join.md`
+- ASOF JOIN — `query/sql/asof-join.md`
+- PIVOT — `query/sql/pivot.md`
+- UNNEST — `query/sql/unnest.md`
+- SAMPLE BY — `query/sql/sample-by.md`
+- LATEST ON — `query/sql/latest-on.md`

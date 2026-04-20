@@ -112,7 +112,8 @@ request goes beyond what this file covers:
 - `common-mistakes.md` — Wrong patterns → correct QuestDB equivalents (read when writing novel SQL not already templated below)
 - `grafana-advanced.md` — Read only for Plotly order book depth charts or advanced features not in the dashboard template below
 - `indicators.md` — Read when user asks for indicators beyond OHLC/VWAP/Bollinger/RSI (MACD, ATR, Stochastic, OBV, Drawdown, Keltner, Donchian, etc.)
-- `cookbook.md` — Fetch paths for 30+ cookbook recipes (only for patterns not inline here)
+- `cookbook.md` — Index of official QuestDB cookbook recipes: finance (slippage, markout, IS, ECN scorecard, last-look, indicators, volume/order-flow, risk) and time-series patterns (FILL strategies, session windows, latest-N-per-partition, sparse sensor joins). Read when the user asks for an execution-quality/TCA metric, a named indicator, or a time-series pattern you don't already have inline.
+- `sql-grammar.md` — Complete index of QuestDB keywords, functions (by category with signatures), data types, and operators. **Read when you need to know "does QuestDB have function X?" or want the correct signature for a function.** Includes native finance builtins (`vwap()`, `twap()`, `spread()`, `mid()`, `wmid()`, `l2price()`), statistical functions, array/matrix operations, and more.
 - `enterprise.md` — **Read when QuestDB uses authentication, HTTPS, tokens, or ACLs** (skip for open source)
 
 ## Critical Rule
@@ -124,13 +125,22 @@ PostgreSQL patterns like `time_bucket()`, `DISTINCT ON`, `HAVING`, and
 
 ## Live Documentation Access
 
-QuestDB docs are available as clean markdown:
+**Every QuestDB docs page has a plain-markdown twin** at the same URL with `.md`
+appended. Fetch these with `curl` for fast, clean, LLM-friendly reads — no HTML
+to strip, no scraping required. Prefer an authoritative doc fetch over guessing
+when you need a keyword, syntax detail, or edge case not covered inline here.
 
 ```bash
-curl -sH "Accept: text/markdown" "https://questdb.com/docs/{page}/"
+# Any doc page — just append .md to the URL
+curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/sql/horizon-join.md"
+curl -sH "Accept: text/markdown" "https://questdb.com/docs/cookbook/sql/finance.md"
+
+# Full documentation index for LLMs — lists every page with its .md URL
+curl -s "https://questdb.com/docs/llms.txt"
 ```
 
-Full table of contents: `curl -s "https://questdb.com/docs/llms.txt"`
+Use `llms.txt` to discover a page when you don't know the exact path. It is the
+authoritative directory of every doc and cookbook recipe.
 
 ---
 
@@ -209,21 +219,124 @@ Rules:
 
 ### Joins
 
+QuestDB has a family of specialised time-series joins. Pick the one that matches
+the question — reaching for ASOF JOIN by default when HORIZON or WINDOW would be
+idiomatic is a common LLM mistake.
+
+| Pattern | Use |
+|---------|-----|
+| Point-in-time match: "value at trade time" | **ASOF JOIN** (or HORIZON JOIN with `LIST (0)`) |
+| Match strictly before trade time | **LT JOIN** |
+| Interleave two time series chronologically | **SPLICE JOIN** |
+| **Price at trade time AND at offsets ±N (markout, IS decomposition, adverse selection)** | **HORIZON JOIN** |
+| **Aggregate quotes within a ±N window around each trade (rolling stats, quote density, pre-/post-trade averages)** | **WINDOW JOIN** |
+| Per-outer-row subquery: top-N per group, dynamic filters, per-row SAMPLE BY / LATEST ON / ASOF | **LATERAL JOIN** |
+
 ```sql
--- ASOF JOIN: match nearest timestamp (≤)
+-- ASOF JOIN: nearest right row with ts ≤ left.ts
 SELECT * FROM trades ASOF JOIN quotes ON (symbol);
 
--- LT JOIN: match strictly before (<)
+-- LT JOIN: strictly ts < left.ts
 SELECT * FROM trades LT JOIN quotes ON (symbol);
 
 -- SPLICE JOIN: merge two time series interleaved
 SELECT * FROM trades SPLICE JOIN quotes ON (symbol);
+
+-- HORIZON JOIN: ASOF at a grid of time offsets, one parallel pass.
+-- For each trade, computes metrics at -1m, -30s, 0, 30s, 1m, ...
+-- Supports multiple right-hand tables (only the last carries RANGE/LIST/AS).
+SELECT h.offset / 1_000_000_000 AS horizon_sec, t.symbol,
+       avg((m.best_bid + m.best_ask) / 2) AS avg_mid
+FROM fx_trades t
+HORIZON JOIN market_data m ON (symbol)
+RANGE FROM -1m TO 5m STEP 30s AS h
+WHERE t.timestamp IN '$yesterday'
+ORDER BY t.symbol, horizon_sec;
+
+-- Or with explicit offsets for implementation shortfall:
+--   LIST (0, 1800s) AS h  →  at_fill and at_30m columns (via PIVOT)
+
+-- WINDOW JOIN: aggregate right-table rows within a ±time window around each left row.
+-- EXCLUDE PREVAILING omits the last-known value before the window start.
+SELECT t.symbol, t.timestamp,
+       avg(c.bid_price) AS avg_bid_pm5s,
+       count()          AS num_quotes
+FROM fx_trades t
+WINDOW JOIN core_price c ON (t.symbol = c.symbol)
+    RANGE BETWEEN 5 seconds PRECEDING AND 5 seconds FOLLOWING
+    EXCLUDE PREVAILING
+WHERE t.symbol = 'EURUSD' AND t.timestamp IN '$now-1h..$now';
+
+-- LATERAL JOIN: subquery evaluated per outer row, can reference outer columns.
+-- Classic top-N per group — two largest fills for each order:
+SELECT o.id, o.desk, t.qty
+FROM orders o
+JOIN LATERAL (
+    SELECT qty FROM fills
+    WHERE order_id = o.id
+    ORDER BY qty DESC LIMIT 2
+) t
+ORDER BY o.id, t.qty DESC;
 ```
 
 Join rules:
-- Time-series joins (ASOF, LT, SPLICE) match on the designated timestamp automatically
-- `ON (symbol)` matches the key column — both tables must have the same column name
-- Standard INNER JOIN and LEFT JOIN also work
+- All time-series joins (ASOF, LT, SPLICE, HORIZON, WINDOW) require a **designated
+  timestamp** on both tables. Timestamps are matched automatically.
+- `ON (symbol)` matches the key column; both tables must use the same column name.
+  Use `ON (t.sym = q.sym)` when the names differ.
+- Standard INNER JOIN and LEFT JOIN also work for non-time-series joins.
+- **HORIZON JOIN**: no other join types in the same level, no SAMPLE BY, no window
+  functions inside, WHERE filters left table only. Wrap in a subquery for anything else.
+- **WINDOW JOIN**: cannot be combined with GROUP BY, window functions, or other
+  join types. Wrap the join in a CTE then aggregate/join in the outer query.
+- **LATERAL JOIN**: only INNER, LEFT, or CROSS variants supported. Requires a
+  parenthesised subquery. Inside the subquery you can reference outer columns and
+  use SAMPLE BY, LATEST ON, ASOF JOIN, window functions, UNION ALL, etc.
+
+For the full syntax of HORIZON / WINDOW / LATERAL (including mixed-precision
+timestamps, dynamic window bounds, and multi-table HORIZON patterns), fetch:
+- `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/sql/horizon-join.md"`
+- `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/sql/window-join.md"`
+- `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/sql/lateral-join.md"`
+
+For ready-made **execution analytics** queries (slippage, markout, implementation
+shortfall, last-look, ECN scorecard) — all built on HORIZON JOIN — see
+`references/cookbook.md` or https://questdb.com/docs/cookbook/sql/finance.md.
+
+### UNNEST (Arrays and JSON Arrays to Rows)
+
+QuestDB supports `UNNEST` for expanding arrays - or JSON arrays stored as
+VARCHAR - into rows. Appears in the `FROM` clause and behaves like a table.
+
+```sql
+-- Native array: expand the sizes at level 2 of each order book row
+SELECT t.symbol, u.vol
+FROM market_data t, UNNEST(t.asks[2]) u(vol)
+WHERE t.timestamp IN '$now-1m..$now' AND t.symbol = 'EURUSD';
+
+-- WITH ORDINALITY gives a 1-based level index (resets per input row)
+SELECT m.symbol, u.vol, u.level
+FROM market_data m, UNNEST(m.asks[2]) WITH ORDINALITY u(vol, level)
+WHERE m.timestamp IN '$now-1m..$now';
+
+-- JSON array (VARCHAR) with typed columns — great for ingesting API payloads
+SELECT u.trade_id, u.price, u.size, u.side, u.time
+FROM UNNEST(
+    payload_varchar::VARCHAR
+    COLUMNS(trade_id LONG, price DOUBLE, size DOUBLE, side VARCHAR, time TIMESTAMP)
+) u;
+```
+
+Key rules:
+- `UNNEST` must be in `FROM` (or after `CROSS JOIN` / comma), not in `SELECT`
+- Native arrays: currently `DOUBLE[]` only. `UNNEST` of a `DOUBLE[][]` yields
+  `DOUBLE[]` rows - chain a second `UNNEST` to fully flatten.
+- JSON: `COLUMNS(name TYPE, ...)` extracts typed fields. Supported types:
+  BOOLEAN, SHORT, INT, LONG, DOUBLE, VARCHAR, TIMESTAMP. Invalid JSON / NULL /
+  empty string all produce 0 rows (no error).
+- `ordinality` is reserved — alias it (`u(val, pos)`) or quote it.
+
+Full reference: `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/sql/unnest.md"`
 
 ### Window Functions
 
@@ -268,17 +381,100 @@ Rules:
 - Cascade views for multi-resolution: `trades → 5s → 1m → 1h` (see Schema Design below)
 - Invalidate/rebuild: `ALTER MATERIALIZED VIEW candles_5s INVALIDATE`
 
-### Timestamp Filtering — TICK Syntax
+### Views (non-materialized)
 
-QuestDB has a compact timestamp filter syntax using semicolons:
+QuestDB also supports regular views - virtual tables defined by a SELECT
+statement, evaluated on every query. Use them for reusable query abstractions
+that don't need incremental precomputation.
 
 ```sql
-WHERE ts IN '2025-02-09;2h'     -- Last 2 hours from that timestamp
-WHERE ts IN '2025-01-01;2025-01-31'  -- Date range
-WHERE ts IN now()               -- Today
+CREATE VIEW IF NOT EXISTS latest_prices AS (
+    SELECT * FROM trades
+    LATEST ON ts PARTITION BY symbol
+);
+
+-- Query it like a table
+SELECT * FROM latest_prices WHERE symbol = 'BTC-USDT';
+
+-- Modify or drop
+ALTER VIEW latest_prices AS (SELECT ...);   -- redefine
+COMPILE VIEW latest_prices;                  -- recompile after schema changes
+DROP VIEW latest_prices;
 ```
 
-This is preferred over `dateadd()` for readability, but both work.
+Use a **materialized view** when you need incremental SAMPLE BY rollups. Use a
+**regular view** for everything else (latest-value lookups, filtered subsets,
+join abstractions).
+
+### Timestamp Filtering — TICK Syntax (Preferred)
+
+**Always prefer TICK over `dateadd()` / `BETWEEN` for time filters.** TICK
+(Temporal Interval Calendar Kit) is QuestDB's declarative syntax for time
+intervals. It is more readable, generates optimized interval scans, handles
+timezones and business days, and expresses complex multi-interval patterns that
+would require UNION ALL or application-side logic otherwise.
+
+**Syntax order:** `date [T time] @timezone #dayFilter ;duration`
+
+```sql
+-- Date variables: resolve at query time
+WHERE ts IN '$today'                     -- full day (midnight to midnight)
+WHERE ts IN '$yesterday'                 -- previous full day
+WHERE ts IN '$tomorrow'                  -- next full day
+
+-- Ranges with $now (point-in-time, microsecond precision)
+WHERE ts IN '$now - 1h..$now'            -- last hour
+WHERE ts IN '$now - 30m..$now'           -- last 30 minutes
+WHERE ts IN '$now - 5bd..$now'           -- last 5 business days (skips weekends)
+
+-- Duration suffix: extends forward from a point
+WHERE ts IN '$now;1h'                    -- 1 hour starting now (forward)
+WHERE ts IN '2025-01-15T09:30;6h30m'     -- NYSE trading session
+
+-- Bracket expansion: generates multiple intervals
+WHERE ts IN '2025-01-[10..15]'           -- days 10 through 15
+WHERE ts IN '2025-01-[5,10..12,20]'      -- specific days + ranges
+WHERE ts IN '2025-[01,06]-[10,15]'       -- Cartesian: Jan+Jun x 10th+15th
+
+-- Day-of-week filters
+WHERE ts IN '2025-01-[01..31]#workday'             -- weekdays only
+WHERE ts IN '2025-01-[01..31]#weekend'             -- weekends only
+WHERE ts IN '2025-01-[01..31]#Mon,Wed,Fri'         -- specific days
+
+-- Timezone-aware (handles DST)
+WHERE ts IN '2025-01-15T09:30@America/New_York;6h30m'
+
+-- Combined: workdays at 09:30 New York time for all of January
+WHERE ts IN '2025-01-[01..31]T09:30@America/New_York#workday;6h30m'
+
+-- Time lists: multiple intraday windows
+WHERE ts IN '2025-01-15T[09:00,14:30];1h'  -- two 1h windows on the same day
+
+-- Date lists (brackets required for lists)
+WHERE ts IN '[$today, $yesterday, 2025-01-15]'
+
+-- ISO week dates
+WHERE ts IN '2025-W01-[1..5]T09:00;8h'  -- Mon-Fri of week 1
+```
+
+**Key rules:**
+- Date variables are case-insensitive (`$TODAY` = `$today`)
+- `$today`/`$yesterday`/`$tomorrow` produce **full-day intervals**; `$now`
+  produces a **point-in-time** (add range or duration to make it useful)
+- Arithmetic units: `y` `M` `w` `d` `bd` `h` `m` `s` `T`(ms) `u`(us) `n`(ns).
+  `bd` (business days) is valid in arithmetic only, not in durations.
+  Case-sensitive: `M` = months, `m` = minutes, `T` = milliseconds.
+- Brackets required for: lists (`[$today, $yesterday]`), ranges with suffixes
+  (`[$now - 2h..$now]@America/New_York`). Optional for standalone variables and
+  bare ranges (`$now - 2h..$now`).
+- Overlapping intervals from bracket expansion are auto-merged.
+- **Exchange calendars (Enterprise):** use `#XNYS`, `#XLON`, etc. (ISO 10383 MIC
+  codes) instead of `#workday` to filter by real exchange trading schedules -
+  holidays, early closes, and lunch breaks are handled automatically.
+  `WHERE ts IN '2025-01-[01..31]#XNYS'` gives only NYSE trading sessions.
+  See: `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/operators/exchange-calendars.md"`
+
+Full reference: `curl -sH "Accept: text/markdown" "https://questdb.com/docs/query/operators/tick.md"`
 
 ### DECLARE (Variables)
 
@@ -380,8 +576,11 @@ conn = pg.connect("user=admin password=quest host=localhost port=8812 dbname=qdb
 ### HTTP REST API
 
 - **Query**: `GET http://localhost:9000/exec?query=URL_ENCODED_SQL`
+- **URL-encode ALL special characters** including parentheses: `(` = `%28`,
+  `)` = `%29`. Unencoded `()` in curl commands triggers a security prompt.
+  Example: `count_distinct%28symbol%29` not `count_distinct(symbol)`
 - **Enterprise**: see Quick Start in `references/enterprise.md`
-- **POST is not supported** for the exec endpoint — use GET only
+- **POST is not supported** for the exec endpoint - use GET only
 - Returns JSON: `{ "columns": [...], "dataset": [...] }`
 
 ---
