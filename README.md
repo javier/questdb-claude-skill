@@ -1,22 +1,32 @@
-# questdb-agent-skill
+# QuestDB skill for coding agents
 
-QuestDB skill for AI coding agents. Experimental.
-
-Works with both **Claude Code** and **Codex**.
+Tested with both **Claude Code** and **Codex**.
 
 ## Installation
 
-Copy the `questdb/` folder into any of these locations so your agent picks it up:
+### npx (recommended)
 
-**Claude Code:**
-- `~/.claude/skills/questdb/` - available in all projects
-- `<project>/.claude/skills/questdb/` - available in a specific project
+```shell
+npx skills add questdb/skills
+```
 
-**Codex:**
-- `~/.codex/skills/questdb/` - available in all projects
-- `<project>/.codex/skills/questdb/` - available in a specific project
+This installs the skill globally for Claude Code. To install it for a specific
+project only, run the command from the project directory with the --local flag.
 
-The folder must contain `SKILL.md` and the `references/` directory.
+#### Manual copy
+
+Copy the questdb/ folder from this repository into any of these locations so
+your agent picks it up:
+
+##### Claude Code:
+- ~/.claude/skills/questdb/ - available in all projects
+- <project>/.claude/skills/questdb/ - available in a specific project
+
+##### Codex:
+- ~/.codex/skills/questdb/ - available in all projects
+- <project>/.codex/skills/questdb/ - available in a specific project
+
+The folder must contain SKILL.md and the references/ directory.
 
 ## Try it out
 
