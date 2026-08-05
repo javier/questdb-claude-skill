@@ -7,10 +7,12 @@ description: >
   client libraries. Also trigger when writing Grafana queries against QuestDB,
   creating materialized views for time-series rollups, working with order book
   or financial market data in QuestDB, or any SQL that involves designated
-  timestamps or time-partitioned tables. QuestDB extends SQL with unique
-  time-series keywords — standard PostgreSQL or MySQL patterns will fail.
-  Always read this skill before writing QuestDB SQL to avoid hallucinating
-  incorrect syntax.
+  timestamps or time-partitioned tables. Also trigger when building dashboards
+  or notebooks inside the QuestDB Web Console, or when the QuestDB MCP bridge
+  (@questdb/mcp-bridge, tools named questdb - *) is mentioned or configured.
+  QuestDB extends SQL with unique time-series keywords — standard PostgreSQL
+  or MySQL patterns will fail. Always read this skill before writing QuestDB
+  SQL to avoid hallucinating incorrect syntax.
 ---
 
 # QuestDB Skill
@@ -25,6 +27,7 @@ description: >
 - Do NOT start `02_ingest.py` separately — `03_dashboard.py` launches it and verifies data automatically
 - Do NOT read extra reference files for topics already covered in this skill file
 - DO read reference files when their topic applies (e.g. enterprise.md for auth, grafana-advanced.md for complex panels)
+- DO use the QuestDB MCP tools instead of the Grafana pipeline when the user wants dashboards inside the QuestDB Web Console — see "Web Console Dashboards (MCP)" below
 - Do NOT use task tracking (TaskCreate/TaskUpdate) for straightforward builds
 - Do NOT add `sleep` commands to wait for data or check background processes (the deploy script handles this)
 - Do NOT Ctrl+C, restart, or re-launch the ingestion process once `03_dashboard.py` has started it
@@ -771,6 +774,39 @@ async def trade_cb(t, receipt_timestamp):
 
 QuestDB's live demo at `demo.questdb.io` has FX and crypto datasets.
 Fetch the schema reference: `curl -sH "Accept: text/markdown" "https://questdb.com/docs/cookbook/demo-data-schema/"`
+
+---
+
+## Web Console Dashboards (MCP)
+
+The QuestDB Web Console (port 9000) has built-in **notebooks**: SQL and
+markdown cells, nine chart types, a drag-and-resize grid layout, and chart
+auto-refresh. The **QuestDB MCP bridge** (`@questdb/mcp-bridge`) exposes them
+to coding agents as MCP tools, alongside schema exploration, query execution,
+and QuestDB documentation lookup.
+
+**Choosing the surface:**
+- User wants a dashboard *inside the QuestDB Web Console*, mentions notebooks,
+  or has no Grafana → use the MCP tools. Zero extra infrastructure: the
+  console ships with QuestDB itself.
+- User wants Grafana, alerting, or dashboards outside the console → use the
+  Grafana pipeline below.
+
+**If the `questdb` MCP server is configured** (tools named
+`questdb - get_pairing_credentials`, `questdb - apply_notebook_state`, …),
+follow the MCP server's own instructions — they cover pairing and every
+notebook tool. Every SQL pattern in this skill works in notebook cells;
+reuse the indicator queries from `references/indicators.md`.
+
+**If the bridge is not configured:** each console version pins a specific
+bridge version. Tell the user to click the MCP status pill at the bottom of
+the Web Console and run the setup command shown there
+(`npx @questdb/mcp-bridge@<expected-version> setup`) — do NOT install
+`@latest` blindly. Full setup, pairing, and permission reference:
+
+```bash
+curl -s "https://questdb.com/docs/getting-started/web-console/mcp-connection.md"
+```
 
 ---
 
